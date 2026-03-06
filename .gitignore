@@ -1,0 +1,33 @@
+# Agent definition files
+.agent/
+.agents/
+_agent/
+_agents/
+
+# AI Backend (Python Fastapi) ignores
+AtcoGenie.AI/.env
+AtcoGenie.AI/__pycache__/
+AtcoGenie.AI/venv/
+AtcoGenie.AI/.venv/
+AtcoGenie.AI/env/
+
+# C# / .NET Ignore
+[Oo]bj/
+[Bb]in/
+AtcoGenie.Server/obj/
+AtcoGenie.Server/bin/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+Publish/
+
+# Temporary / Backup folders
+working_ backup/
+*.bak
+*.tmp
+*.log
+
+# Personal files
+Hazdor-AtcoGenie Project Plan - Sheet1.pdf
