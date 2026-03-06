@@ -1,0 +1,51 @@
+# =============================================================================
+# AtcoGenie AI Engine — Python Dependencies
+# Pin all versions for reproducibility
+# =============================================================================
+
+# --- Core Framework ---
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# --- LangChain 1.0 ---
+langchain>=0.3.0
+# langchain-openai>=0.3.0
+langchain-google-genai>=2.0.0
+langgraph>=0.2.0
+langgraph-checkpoint-postgres>=2.0.0
+
+# --- Database Drivers ---
+aioodbc
+# hdbcli>=2.23.24         # SAP HANA (commented out as not needed yet)
+sqlparse
+asyncpg
+psycopg-binary
+
+# --- Authentication & Security ---
+ldap3==2.9.1            # Active Directory LDAP authentication
+PyJWT                  # JWT issuance and validation (standard)
+passlib                # Password hashing (standard)
+
+# --- Caching & Session ---
+redis                  # Redis client (standard)
+langchain-google-genai # Google Gemini support (as requested)
+
+# --- Observability ---
+structlog==25.1.0       # Structured logging
+# langsmith==0.3.45       # [Temporarily disabled - needs MSVC build tools on 3.14]
+
+# --- SSE Streaming ---
+sse-starlette==2.3.3    # Server-Sent Events for FastAPI
+
+# --- Testing ---
+pytest
+pytest-asyncio
+pytest-cov
+httpx           # Async test client for FastAPI
+
+# --- Code Quality ---
+# black==25.1.0          # [Temporarily disabled - needs compilation on 3.14]
+ruff==0.11.4
+mypy==1.15.0

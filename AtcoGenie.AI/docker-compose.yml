@@ -1,0 +1,44 @@
+# =============================================================================
+# AtcoGenie AI Engine — Local Development Stack
+# Only includes services needed for the Python AI backend.
+# Business databases (Pharma, SAP, Third-Party) are EXISTING systems — not here.
+# =============================================================================
+
+services:
+  # --- Redis (Cache, Sessions, Rate Limiting) ---
+  redis:
+    image: redis:7-alpine
+    container_name: atcogenie-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # --- PostgreSQL (LangGraph Checkpointer) ---
+  # Separate from the business PostgreSQL used by .NET backend
+  postgres-checkpointer:
+    image: postgres:16-alpine
+    container_name: atcogenie-checkpointer
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: AtcoGenie_Checkpoints
+    ports:
+      - "5433:5432"   # Port 5433 to avoid conflict with .NET's PostgreSQL on 5432
+    volumes:
+      - pg_checkpointer_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  redis_data:
+  pg_checkpointer_data:

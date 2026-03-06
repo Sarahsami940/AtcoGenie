@@ -1,0 +1,63 @@
+[
+    {
+        "Id": "hcms-core",
+        "Name": "HCMS Employee Management",
+        "ConnectionStringName": "HcmsConnection",
+        "Entities": [
+            {
+                "Name": "EmployeeAttendance",
+                "TvfName": "dbo.fn_GetAuthorizedAttendance",
+                "Description": "Attendance logs for authorized employees",
+                "Columns": [
+                    {
+                        "Name": "EmployeeId",
+                        "DataType": "int",
+                        "Description": "Unique ID of employee",
+                        "IsPrimary": true
+                    },
+                    {
+                        "Name": "LogTime",
+                        "DataType": "datetime",
+                        "Description": "Time of check-in/out"
+                    },
+                    {
+                        "Name": "Direction",
+                        "DataType": "nvarchar",
+                        "Description": "In or Out"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "Id": "pharma-pulse",
+        "Name": "PharmaPulse Sales",
+        "ConnectionStringName": "PharmaPulseConnection",
+        "Entities": [
+            {
+                "Name": "MonthlySales",
+                "TvfName": "dbo.fn_GetAuthorizedSales",
+                "Description": "Sales data for regional managers",
+                "Columns": [
+                    {
+                        "Name": "SaleId",
+                        "DataType": "int",
+                        "IsPrimary": true
+                    },
+                    {
+                        "Name": "Amount",
+                        "DataType": "decimal"
+                    },
+                    {
+                        "Name": "Region",
+                        "DataType": "nvarchar"
+                    },
+                    {
+                        "Name": "SaleDate",
+                        "DataType": "date"
+                    }
+                ]
+            }
+        ]
+    }
+]
