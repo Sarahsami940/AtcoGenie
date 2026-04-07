@@ -6,55 +6,46 @@ and the composite role profile assembled during login.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Optional
-
-
-class AccessLevel(str, Enum):
-    NO_ACCESS = "no_access"
-    VIEWER = "viewer"
-    MANAGER = "manager"
-    ADMIN = "admin"
-
+from typing import Optional, List, Dict
 
 @dataclass(frozen=True)
-class SystemRole:
-    """Role for a single target system (Pharma, SAP, or Third-Party)."""
-    system: str
-    access_level: AccessLevel
-    scope_id: str                       # employee_id, ad_username, etc.
-    scope_column: str                   # Column name used for WHERE injection
-    allowed_tables: tuple[str, ...] = ()
-    company_codes: tuple[str, ...] = () # For multi-company filtering
-
+class UserFormRight:
+    """A single row from imd_userformrights mapping to an application's form/report."""
+    security_user_id: Optional[int]
+    ccode: Optional[str]
+    application_code: Optional[str]
+    form_id: Optional[str]
+    add_mode: Optional[bool]
+    edit_mode: Optional[bool]
+    view_mode: Optional[bool]
+    delete_mode: Optional[bool]
 
 @dataclass(frozen=True)
 class CompositeRoleProfile:
     """
-    Assembled from parallel role queries across all 3 databases.
-    Cached in Redis with 15-min TTL. Referenced by JWT via cache key.
+    Stored directly by the .NET Authentication endpoint into Redis.
+    Contains all raw rights from the IMD DB so the AI can filter report access.
     """
     ad_user_id: str
     employee_id: str
     email: str
     display_name: str
     department: str
-    roles: dict[str, SystemRole] = field(default_factory=dict)
-    # Keys: "pharma", "sap", "thirdparty"
+    form_rights: List[UserFormRight] = field(default_factory=list)
 
-    @property
-    def accessible_systems(self) -> list[str]:
-        return [
-            sys for sys, role in self.roles.items()
-            if role.access_level != AccessLevel.NO_ACCESS
-        ]
-
-    def get_role(self, system: str) -> Optional[SystemRole]:
-        return self.roles.get(system)
-
-    def has_access(self, system: str) -> bool:
-        role = self.roles.get(system)
-        return role is not None and role.access_level != AccessLevel.NO_ACCESS
+    def has_report_access(self, application_code: str, report_sp_name: str) -> bool:
+        """
+        Check if the user has 'ReportsMode' or 'ViewMode' for a specific stored procedure report.
+        For Phase 1, the `form_id` usually matches the report name or SP alias.
+        """
+        for right in self.form_rights:
+            if right.application_code and right.application_code.lower() == application_code.lower():
+                # Compare form_id against the exact SP being called to verify access
+                # Adjust string matching logic based on exact IMD mapping vs SP names
+                if right.form_id and right.form_id.lower() == report_sp_name.lower():
+                    # We assume true access if they have ViewMode
+                    return right.view_mode is True
+        return False
 
     def to_cache_dict(self) -> dict:
         return {
@@ -63,66 +54,55 @@ class CompositeRoleProfile:
             "email": self.email,
             "display_name": self.display_name,
             "department": self.department,
-            "roles": {
-                sys: {
-                    "system": role.system,
-                    "access_level": role.access_level.value,
-                    "scope_id": role.scope_id,
-                    "scope_column": role.scope_column,
-                    "allowed_tables": list(role.allowed_tables),
-                    "company_codes": list(role.company_codes),
-                }
-                for sys, role in self.roles.items()
-            },
+            "form_rights": [
+                {
+                    "security_user_id": r.security_user_id,
+                    "ccode": r.ccode,
+                    "application_code": r.application_code,
+                    "form_id": r.form_id,
+                    "add_mode": r.add_mode,
+                    "edit_mode": r.edit_mode,
+                    "view_mode": r.view_mode,
+                    "delete_mode": r.delete_mode
+                } for r in self.form_rights
+            ]
         }
 
     @classmethod
     def from_cache_dict(cls, data: dict) -> "CompositeRoleProfile":
-        roles = {}
-        for sys, rd in data.get("roles", {}).items():
-            roles[sys] = SystemRole(
-                system=rd["system"],
-                access_level=AccessLevel(rd["access_level"]),
-                scope_id=rd["scope_id"],
-                scope_column=rd["scope_column"],
-                allowed_tables=tuple(rd.get("allowed_tables", [])),
-                company_codes=tuple(rd.get("company_codes", [])),
-            )
+        rights = []
+        for rd in data.get("form_rights", []):
+            rights.append(UserFormRight(
+                security_user_id=rd.get("security_user_id"),
+                ccode=rd.get("ccode"),
+                application_code=rd.get("application_code"),
+                form_id=rd.get("form_id"),
+                add_mode=rd.get("add_mode"),
+                edit_mode=rd.get("edit_mode"),
+                view_mode=rd.get("view_mode"),
+                delete_mode=rd.get("delete_mode")
+            ))
+            
         return cls(
-            ad_user_id=data["ad_user_id"],
-            employee_id=data["employee_id"],
-            email=data["email"],
-            display_name=data["display_name"],
-            department=data["department"],
-            roles=roles,
+            ad_user_id=data.get("ad_user_id", ""),
+            employee_id=data.get("employee_id", ""),
+            email=data.get("email", ""),
+            display_name=data.get("display_name", ""),
+            department=data.get("department", "N/A"),
+            form_rights=rights
         )
-
 
 @dataclass(frozen=True)
 class SecurityContext:
-    """
-    Per-request security context injected into the LangChain agent.
-    Built from JWT claims + cached CompositeRoleProfile.
-    """
-    user_id: str                        # AD username (e.g., "sarah.sami")
-    employee_id: str                    # HCMS employee ID
+    """Per-request Context for LangChain filters."""
+    user_id: str
+    employee_id: str
     email: str
     display_name: str
     department: str
     role_profile: CompositeRoleProfile
     request_id: str = ""
 
-    @property
-    def accessible_systems(self) -> list[str]:
-        return self.role_profile.accessible_systems
+    def has_report_access(self, application_code: str, report_sp_name: str) -> bool:
+        return self.role_profile.has_report_access(application_code, report_sp_name)
 
-    def has_access(self, system: str) -> bool:
-        return self.role_profile.has_access(system)
-
-    def get_scope_id(self, system: str) -> Optional[str]:
-        role = self.role_profile.get_role(system)
-        return role.scope_id if role else None
-
-    def get_scope_column(self, system: str) -> Optional[str]:
-        role = self.role_profile.get_role(system)
-        return role.scope_column if role else None

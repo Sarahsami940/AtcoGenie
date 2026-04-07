@@ -39,7 +39,7 @@ public class GatekeeperMiddleware
                     var username = adUser.Contains("\\") ? adUser.Split('\\').Last() : adUser;
                     
                     // Real DB Lookup
-                    var mapping = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(dbContext.UserMappings, u => u.SamAccountName.ToLower() == username.ToLower());
+                    var mapping = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(dbContext.UserFormRights, u => u.SamAccountName.ToLower() == username.ToLower());
                     
                     if (mapping != null)
                     {

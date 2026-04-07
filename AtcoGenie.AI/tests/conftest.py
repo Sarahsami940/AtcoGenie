@@ -18,7 +18,6 @@ def test_settings() -> Settings:
         llm_provider="openai",
         openai_api_key="test-key",
         pharma_db_host="",
-        sap_db_host="",
         thirdparty_db_host="",
         redis_url="redis://localhost:6379/1",
         postgres_host="localhost",

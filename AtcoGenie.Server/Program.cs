@@ -3,6 +3,8 @@ using AtcoGenie.Server.Middleware;
 using Microsoft.EntityFrameworkCore;
 using AtcoGenie.Server.Data;
 using AtcoGenie.Server.Application;
+using AtcoGenie.Server.Endpoints;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +24,11 @@ builder.Services.AddDbContext<AtcoGenie.Server.Infrastructure.Data.GenieDbContex
 builder.Services.AddScoped<AtcoGenie.Server.Application.Services.IChatHistoryService, AtcoGenie.Server.Application.Services.ChatHistoryService>();
 
 builder.Services.AddApplicationServices();
+
+// Redis setup for Sessions
+var redisConnection = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379,defaultDatabase=0";
+builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect(redisConnection));
+
 
 // Fix for ChatPersistence: Handle Entity Framework circular references in JSON
 builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =>
@@ -116,6 +123,8 @@ app.MapGet("/api/whoami", (HttpContext context) =>
 }); 
 
 
+// Authentication Endpoint for Python frontend
+app.MapAuthEndpoints();
 
 // MODULE 3: User Company Context
 app.MapGet("/api/user/companies", async (AtcoGenie.Server.Data.ImdDbContext db, HttpContext context) =>
@@ -191,9 +200,10 @@ app.MapGet("/api/schema", async (AtcoGenie.Server.Application.Services.ISchemaSe
 // MAIN GENIE API: Query endpoint
 app.MapPost("/api/query", async (
     AtcoGenie.Server.Application.DTOs.GenieQueryRequest request,
-    AtcoGenie.Server.Application.Services.IGenieQueryService queryService) =>
+    AtcoGenie.Server.Application.Services.IGenieQueryService queryService,
+    HttpContext httpContext) =>
 {
-    var response = await queryService.QueryAsync(request);
+    var response = await queryService.QueryAsync(request, httpContext.RequestAborted);
     return response;
 });
 

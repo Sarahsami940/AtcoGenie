@@ -12,22 +12,18 @@ async def test_rate_limiter_allows_requests(client: AsyncClient):
     assert response.status_code == 200
 
 @pytest.mark.asyncio
-async def test_rate_limiter_blocks_excessive_requests(client: AsyncClient, app):
-    # Note: Rate limit tests might be tricky in pure mock if redis is absent,
-    # but let's assume testing env uses a real or mock redis.
-    # The client connects to an endpoint that isn't excluded.
+async def test_rate_limiter_blocks_excessive_requests(client: AsyncClient, monkeypatch):
+    import fakeredis
     
-    # We will spam an endpoint that requires auth (which will return 401 Authentication required)
-    # but the rate limiter runs *before* auth middleware!
+    # Mock the aioredis.from_url to return a fakeredis instance
+    fake_redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+    monkeypatch.setattr("app.middleware.rate_limit.aioredis.from_url", lambda *args, **kwargs: fake_redis)
+
     status_codes = []
     
     # Send 105 requests (limit is 100)
     for _ in range(105):
-        response = await client.post("/api/v1/auth/login", json={"username": "a", "password": "b"})
-        # Wait, /auth/login is excluded! Let's hit a protected endpoint.
-    
-    for _ in range(105):
-        response = await client.post("/chat") # dummy endpoint
+        response = await client.post("/chat") # missing endpoint, but it's okay because middleware intercepts
         status_codes.append(response.status_code)
         
     assert 429 in status_codes

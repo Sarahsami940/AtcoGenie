@@ -27,7 +27,6 @@ async def test_health_reports_all_services(client: AsyncClient):
         "postgres_checkpointer",
         "postgres_imd",
         "pharma_crm",
-        "sap_hana",
         "thirdparty",
     ]
     for svc in expected_services:

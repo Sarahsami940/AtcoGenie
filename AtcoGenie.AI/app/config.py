@@ -36,12 +36,6 @@ class Settings(BaseSettings):
     pharma_pool_min: int = 2
     pharma_pool_max: int = 10
 
-    # --- SAP HANA ---
-    sap_db_host: str = ""
-    sap_db_port: int = 30015
-    sap_db_user: str = ""
-    sap_db_password: str = ""
-    sap_executor_workers: int = 4
 
     # --- Third-Party (MS SQL) ---
     thirdparty_db_host: str = "10.10.0.88"
@@ -98,7 +92,7 @@ class Settings(BaseSettings):
             f"DATABASE={self.pharma_db_name};"
             f"UID={self.pharma_db_user};"
             f"PWD={{{self.pharma_db_password}}};"
-            "Encrypt=yes;"
+            "Encrypt=no;"
             "TrustServerCertificate=yes;"
         )
 
@@ -126,7 +120,7 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.app_env == "production"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "case_sensitive": False}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "case_sensitive": False, "extra": "ignore"}
 
 
 @lru_cache

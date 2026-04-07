@@ -51,12 +51,13 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         
         try:
             redis_client = await self._get_redis()
-            current_time = int(time.time())
+            current_time = time.time()
+            member_id = f"{current_time}_{id(request)}"
             
             # Redis Pipeline for atomic ops
             async with redis_client.pipeline(transaction=True) as pipe:
                 # Add current request timestamp
-                pipe.zadd(key, {str(current_time): current_time})
+                pipe.zadd(key, {member_id: current_time})
                 # Remove requests older than window
                 pipe.zremrangebyscore(key, 0, current_time - self.window_seconds)
                 # Count remaining requests

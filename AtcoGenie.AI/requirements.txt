@@ -34,6 +34,7 @@ langchain-google-genai # Google Gemini support (as requested)
 
 # --- Observability ---
 structlog==25.1.0       # Structured logging
+langfuse>=2.0.0,<3.0.0  # Pinned v2 to match langfuse:2 Docker server. SDK not used directly (Python 3.14 pydantic v1 compat issue) — raw HTTP tracer in app/agent/tracer.py instead
 # langsmith==0.3.45       # [Temporarily disabled - needs MSVC build tools on 3.14]
 
 # --- SSE Streaming ---

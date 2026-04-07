@@ -55,34 +55,6 @@ async def _check_pharma(settings: Settings) -> dict:
         return {"status": "unhealthy", "error": str(e)}
 
 
-async def _check_sap(settings: Settings) -> dict:
-    if not settings.sap_db_host:
-        return {"status": "not_configured"}
-    try:
-        from concurrent.futures import ThreadPoolExecutor
-        from hdbcli import dbapi
-
-        def _connect():
-            conn = dbapi.connect(
-                address=settings.sap_db_host,
-                port=settings.sap_db_port,
-                user=settings.sap_db_user,
-                password=settings.sap_db_password,
-            )
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM DUMMY")
-            cursor.close()
-            conn.close()
-
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            await asyncio.wait_for(
-                loop.run_in_executor(executor, _connect), timeout=5.0
-            )
-        return {"status": "healthy"}
-    except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
-
 
 async def _check_thirdparty(settings: Settings) -> dict:
     if not settings.thirdparty_db_host:
@@ -154,7 +126,6 @@ async def health_check(
         _probe_pool("postgres", settings.postgres_dsn), # checkpointer
         _check_postgres(settings.imd_dsn, "imd"),       # imd (manual check is fine for now)
         _probe_pool("pharma"),
-        _check_sap(settings),
         _probe_pool("thirdparty"),
         return_exceptions=True,
     )
@@ -169,8 +140,7 @@ async def health_check(
         "postgres_checkpointer": _safe(results[0]),
         "postgres_imd": _safe(results[1]),
         "pharma_crm": _safe(results[2]),
-        "sap_hana": _safe(results[3]),
-        "thirdparty": _safe(results[4]),
+        "thirdparty": _safe(results[3]),
     }
 
     all_healthy = all(

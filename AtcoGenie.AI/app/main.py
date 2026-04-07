@@ -12,11 +12,18 @@ This is the main application file. It:
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+import os
+
+from dotenv import load_dotenv
+load_dotenv()  # Ensures LangSmith vars in .env are pushed to os.environ for LangChain
+
 from app.middleware.rate_limit import RateLimiterMiddleware
 
 from app.config import get_settings
 from app.logging_config import setup_logging, get_logger, generate_request_id, request_id_var
 from app.api import health
+from app.api import auth
+from app.api import chat
 
 
 logger = get_logger(__name__)
@@ -50,6 +57,24 @@ async def lifespan(app: FastAPI):
     role_cache = RoleCache(settings)
     await role_cache.connect()
     app.state.role_cache = role_cache
+
+    # 3. Langfuse Observability (raw HTTP tracer — SDK-free for Python 3.14 compat)
+    from app.agent.tracer import init_tracer
+    from dotenv import dotenv_values
+    _env = dotenv_values(os.path.join(os.getcwd(), ".env"))
+    tracer = init_tracer(
+        public_key=_env.get("LANGFUSE_PUBLIC_KEY", "").strip(),
+        secret_key=_env.get("LANGFUSE_SECRET_KEY", "").strip(),
+        host=_env.get("LANGFUSE_HOST", "http://localhost:3000").strip(),
+    )
+    if tracer:
+        import asyncio
+        auth_ok = await tracer.auth_check()
+        if auth_ok:
+            logger.info("langfuse_connected", host=_env.get("LANGFUSE_HOST", ""))
+        else:
+            logger.warning("langfuse_auth_failed", hint="Check keys match the Langfuse server project")
+    app.state.tracer = tracer
 
     logger.info("atcogenie_ai_ready", status="all_services_initialized")
 
@@ -114,7 +139,8 @@ def create_app() -> FastAPI:
 
     # --- Routers ---
     app.include_router(health.router)
-    # TODO [Module 9]: app.include_router(chat.router)
+    app.include_router(auth.router)
+    app.include_router(chat.router)
 
     return app
 

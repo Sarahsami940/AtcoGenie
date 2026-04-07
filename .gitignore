@@ -23,6 +23,10 @@ AtcoGenie.Server/bin/
 .vs/
 Publish/
 
+# Secrets - NEVER commit these
+AtcoGenie.Server/appsettings.json
+AtcoGenie.Server/appsettings.*.json
+
 # Temporary / Backup folders
 working_ backup/
 *.bak

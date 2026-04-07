@@ -35,7 +35,8 @@ public static class DependencyInjection
         // Register SqlValidator for validating AI-generated SQL
         services.AddScoped<Services.ISqlValidator, Services.SqlValidator>();
         
-        // Register GenieQueryService as the main entry point (now with AI integration)
+        // Register GenieQueryService — now proxies to the Python AI Engine
+        services.AddHttpClient("AiEngine"); // Named client for forwarding to Python FastAPI
         services.AddScoped<Services.IGenieQueryService, Services.GenieQueryService>();
         
         services.AddScoped<Services.IFolderService, Services.FolderService>();
