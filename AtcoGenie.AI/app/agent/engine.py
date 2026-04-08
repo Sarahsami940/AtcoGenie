@@ -9,6 +9,7 @@ Tracing: Langfuse 4.x via CallbackHandler (injected per-request).
 """
 
 import os
+from functools import lru_cache
 
 from langchain.agents import create_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -167,8 +168,11 @@ def get_llm():
             model=settings.google_model,
             google_api_key=settings.google_api_key,
             temperature=1,
-            max_retries=6,
+            max_retries=2,          # Point 5: cut from 6→2 for faster failure
             max_output_tokens=4096,
+            streaming=True,
+            # Point 2: disable thinking budget — saves 3-5 s on every request
+            thinking={"type": "disabled"},
         )
     else:
         try:
@@ -182,16 +186,40 @@ def get_llm():
         )
 
 
+# ---------------------------------------------------------------------------
+# Point 3: Agent cache — keyed on (user_id, role, team_ids_csv).
+# The LangGraph compiled graph and LLM are expensive to build; reusing them
+# across requests for the same user context eliminates repeated startup cost.
+# Tools close over db_manager / security_context at creation time, so the
+# cache key MUST include anything that changes tool behaviour across users.
+# maxsize=64 covers 64 concurrent unique user-contexts before LRU eviction.
+# ---------------------------------------------------------------------------
+_agent_cache: dict = {}   # key → compiled agent
+_AGENT_CACHE_MAX = 64
+
+
 def create_agent_executor(
     security_context: SecurityContext,
     db_manager: DatabaseManager,
     user_context: ResolvedUserContext,
 ):
     """
-    Constructs the LangChain 1.0 Agent with tools bound to the user's exact permissions.
-    Attaches a Langfuse CallbackHandler for per-request tracing.
-    Returns a compiled StateGraph that can be invoked/streamed.
+    Returns a compiled LangGraph agent for the user's context.
+    Agents are cached per (user_id, role, team_ids_csv) to avoid rebuilding
+    on every request — the LLM, tools, and graph compilation are reused.
     """
+    cache_key = (
+        security_context.user_id,
+        user_context.user_role,
+        user_context.team_ids_csv,
+        user_context.is_admin,
+    )
+
+    if cache_key in _agent_cache:
+        logger.debug("agent_cache_hit", user=security_context.user_id)
+        return _agent_cache[cache_key]
+
+    logger.info("agent_cache_miss_building", user=security_context.user_id, role=user_context.user_role)
     llm = get_llm()
     tools = get_agent_tools(security_context, db_manager, user_context)
     system_prompt = build_system_prompt(security_context, user_context)
@@ -202,4 +230,11 @@ def create_agent_executor(
         system_prompt=system_prompt,
     )
 
+    # Evict oldest entry if cache is full
+    if len(_agent_cache) >= _AGENT_CACHE_MAX:
+        oldest_key = next(iter(_agent_cache))
+        del _agent_cache[oldest_key]
+        logger.info("agent_cache_evicted", evicted_user=oldest_key[0])
+
+    _agent_cache[cache_key] = agent
     return agent

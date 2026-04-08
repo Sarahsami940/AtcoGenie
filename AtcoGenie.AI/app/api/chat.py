@@ -228,10 +228,9 @@ async def chat_stream(
     # Per-request state
     q: asyncio.Queue = asyncio.Queue()
     progress_bus.set_queue(q)
-    cancelled = asyncio.Event()          # signals cancellation to the agent task
 
     async def run_agent():
-        """Runs the agent; pushes progress strings and a final sentinel dict to `q`."""
+        """Runs the LangChain agent using astream_events for real-time text generation."""
         try:
             messages = []
             for msg in req.chat_history:
@@ -261,48 +260,59 @@ async def chat_stream(
 
             t_start = __import__("time").monotonic()
 
-            # Wrap agent invocation so it can be cancelled cleanly
-            agent_task = asyncio.create_task(
-                agent.ainvoke({"messages": messages}, config=run_config)
-            )
-            cancelled_task = asyncio.create_task(cancelled.wait())
+            # -------------------------------------------------------------------
+            # Point 1: Real LLM streaming via LangGraph native stream_mode.
+            #
+            # agent.astream(..., stream_mode="messages") yields (chunk, metadata)
+            # pairs where chunk is an AIMessageChunk or ToolMessage.
+            # We only push text chunks to the UI when:
+            #   - chunk is an AIMessageChunk (not a ToolMessage)
+            #   - chunk.content is a non-empty string (not tool_call metadata)
+            # This gives true token-by-token streaming of the final answer and
+            # completely skips intermediate tool-selection JSON noise.
+            # -------------------------------------------------------------------
+            streamed_reply = ""
 
-            done, pending = await asyncio.wait(
-                {agent_task, cancelled_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            # Send user metadata early so frontend can set up the UI
+            meta = {
+                "type": "meta",
+                "user": {
+                    "display_name": context.display_name,
+                    "role": user_context.user_role,
+                    "teams": user_context.team_names,
+                    "is_admin": user_context.is_admin,
+                }
+            }
+            await q.put(meta)
 
-            # Always clean up the non-winning task
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
+            from langchain_core.messages import AIMessageChunk
 
-            if cancelled.is_set():
-                logger.info("agent_cancelled", user=context.user_id)
-                await q.put({"type": "cancelled"})
-                return
+            async for chunk, _meta in agent.astream(
+                {"messages": messages},
+                stream_mode="messages",
+                config=run_config,
+            ):
+                # Only stream text tokens from the final AI answer
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                # Skip tool-call selection chunks (they have tool_calls but no text)
+                if chunk.tool_calls or chunk.tool_call_chunks:
+                    continue
 
-            result = await agent_task  # already done, just retrieve result
+                text = ""
+                if isinstance(chunk.content, list):
+                    text = "".join(
+                        p.get("text", "") for p in chunk.content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                elif isinstance(chunk.content, str):
+                    text = chunk.content
 
-            response_messages = result.get("messages", [])
-            reply = ""
-            for msg in reversed(response_messages):
-                if hasattr(msg, "content") and hasattr(msg, "type") and msg.type == "ai":
-                    raw = msg.content
-                    if isinstance(raw, list):
-                        reply = "\n".join(
-                            part.get("text", "") for part in raw
-                            if isinstance(part, dict) and part.get("type") == "text"
-                        )
-                    else:
-                        reply = raw
-                    break
+                if text:
+                    await q.put({"type": "chunk", "text": text})
+                    streamed_reply += text
 
-            if not reply:
-                reply = "I'm sorry, I couldn't generate a response."
+            reply = streamed_reply or "I'm sorry, I couldn't generate a response."
 
             latency_ms = (__import__("time").monotonic() - t_start) * 1000
             logger.info("chat_stream_response", user=context.user_id,
@@ -311,12 +321,8 @@ async def chat_stream(
             if langfuse_cb:
                 asyncio.create_task(langfuse_cb.flush(reply))
 
-            await q.put({"type": "done", "reply": reply, "user": {
-                "display_name": context.display_name,
-                "role": user_context.user_role,
-                "teams": user_context.team_names,
-                "is_admin": user_context.is_admin,
-            }})
+            # Send done event for backwards compatibility with older frontends
+            await q.put({"type": "done", "reply": reply, "user": meta["user"]})
 
         except asyncio.CancelledError:
             logger.info("agent_task_cancelled", user=context.user_id)
@@ -337,21 +343,10 @@ async def chat_stream(
         keepalive_counter = 0
 
         while True:
-            # --- Detect client disconnect and cancel immediately ---
-            if await request.is_disconnected():
-                cancelled.set()
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-                break
-
             try:
-                # Poll frequently for fast streaming; short timeout = responsive cancellation
+                # Fast polling so we push chunks instantly
                 item = await asyncio.wait_for(q.get(), timeout=0.05)
             except asyncio.TimeoutError:
-                # Only send keepalive every 2 s (40 × 50 ms) to avoid network noise
                 keepalive_counter += 1
                 if keepalive_counter >= 40:
                     keepalive_counter = 0
@@ -359,13 +354,15 @@ async def chat_stream(
                 continue
 
             if isinstance(item, str):
-                # Progress message from tools
                 yield f"data: {json.dumps({'type': 'status', 'message': item})}\n\n"
 
             elif isinstance(item, dict):
                 event_type = item.get("type")
 
-                if event_type == "cancelled":
+                if event_type == "chunk" or event_type == "meta":
+                    yield f"data: {json.dumps(item)}\n\n"
+
+                elif event_type == "cancelled":
                     yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
                     break
 
@@ -374,31 +371,17 @@ async def chat_stream(
                     break
 
                 elif event_type == "done":
-                    reply_text = item.get("reply", "")
-
-                    # 1. Stream chunks for fast incremental display (new frontends)
-                    CHUNK = 8  # chars per event — increase for faster, decrease for smoother
-                    was_cancelled = False
-                    for i in range(0, len(reply_text), CHUNK):
-                        if cancelled.is_set() or await request.is_disconnected():
-                            was_cancelled = True
-                            break
-                        chunk = reply_text[i:i + CHUNK]
-                        yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
-
-                    if was_cancelled:
-                        # Clean stop — don't send `done` so old frontend shows nothing
-                        yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-                        break
-
-                    # 2. Always send full `done` at end for backward compat with
-                    #    compiled frontend that reassembles from the complete reply
+                    # Emit stream_end first, then done for compat
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
                     yield f"data: {json.dumps(item)}\n\n"
                     break
 
         # Cleanup
-        cancelled.set()
         progress_bus.set_queue(asyncio.Queue())
+        # We do NOT cancel the background task here anymore.
+        # This fixes the bug where mobile Chrome/Safari sleeping a tab 
+        # caused FastAPI to throttle and erroneously terminate the task.
+        # The background task will just finish cleanly and its output to `q` gets GC'd.
 
     return StreamingResponse(
         event_generator(),

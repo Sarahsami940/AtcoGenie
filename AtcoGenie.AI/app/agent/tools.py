@@ -453,11 +453,10 @@ def get_agent_tools(
                 )
 
             period = f"{from_year}/{from_month:02d}–{to_year}/{to_month:02d}"
-            comparison_parts = [
-                f"## Customer Sales Comparison: {', '.join(product_names)}",
-                f"**Period:** {period} | **Team:** {team_ids}",
-            ]
-            for search_name, (pid, matched_name) in name_to_match.items():
+
+            # Point 4: fetch all product SPs in PARALLEL instead of sequentially
+            async def _fetch_one_product(search_name: str, pid: str, matched_name: str) -> str:
+                """Runs a single product SP and returns a formatted markdown section."""
                 try:
                     logger.info("product_comparison_sp", product=matched_name, pid=pid, team=team_ids)
                     results = await db_manager.execute_sp(
@@ -468,32 +467,43 @@ def get_agent_tools(
                         user_context.user_role, security_context.employee_id
                     )
                     if not results:
-                        comparison_parts.append(
+                        return (
                             f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})"
                             f"\n- ⚠️ No sales data found for this product in team {team_ids} during {period}."
                         )
-                    else:
-                        # Detect customer column (handle both lowercase and PascalCase)
-                        cust_key = next((k for k in results[0] if k.lower() == "customer"), None)
-                        customers = list({r.get(cust_key, "") for r in results if r.get(cust_key)}) if cust_key else []
 
-                        # Aggregate key numeric columns
-                        numeric_totals = {}
-                        for col in results[0]:
-                            vals = [r[col] for r in results if isinstance(r.get(col), (int, float))]
-                            if vals:
-                                numeric_totals[col] = sum(vals)
+                    cust_key = next((k for k in results[0] if k.lower() == "customer"), None)
+                    customers = list({r.get(cust_key, "") for r in results if r.get(cust_key)}) if cust_key else []
 
-                        comparison_parts.append(f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})")
-                        comparison_parts.append(f"- **Records:** {len(results):,}")
-                        comparison_parts.append(f"- **Unique customers:** {len(customers):,}")
-                        for col, total in list(numeric_totals.items())[:8]:
-                            comparison_parts.append(f"- **{col} Total:** {total:,.2f}")
-                        if customers:
-                            comparison_parts.append(f"- **Top customers (sample):** {', '.join(customers[:10])}")
-                        comparison_parts.append(f"- **Sample rows (3):** {json.dumps(results[:3], default=str)}")
+                    numeric_totals = {}
+                    for col in results[0]:
+                        vals = [r[col] for r in results if isinstance(r.get(col), (int, float))]
+                        if vals:
+                            numeric_totals[col] = sum(vals)
+
+                    lines = [f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})"]
+                    lines.append(f"- **Records:** {len(results):,}")
+                    lines.append(f"- **Unique customers:** {len(customers):,}")
+                    for col, total in list(numeric_totals.items())[:8]:
+                        lines.append(f"- **{col} Total:** {total:,.2f}")
+                    if customers:
+                        lines.append(f"- **Top customers (sample):** {', '.join(customers[:10])}")
+                    lines.append(f"- **Sample rows (3):** {json.dumps(results[:3], default=str)}")
+                    return "\n".join(lines)
                 except Exception as e:
-                    comparison_parts.append(f"\n### {search_name}: ⚠️ Error — {str(e)}")
+                    return f"\n### {search_name}: ⚠️ Error — {str(e)}"
+
+            # Fire all SP calls simultaneously
+            import asyncio as _asyncio
+            product_sections = await _asyncio.gather(*[
+                _fetch_one_product(sname, pid, mname)
+                for sname, (pid, mname) in name_to_match.items()
+            ])
+
+            comparison_parts = [
+                f"## Customer Sales Comparison: {', '.join(product_names)}",
+                f"**Period:** {period} | **Team:** {team_ids}",
+            ] + list(product_sections)
 
             return "\n".join(comparison_parts)
 
