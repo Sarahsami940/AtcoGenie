@@ -261,17 +261,11 @@ async def chat_stream(
             t_start = __import__("time").monotonic()
 
             # -------------------------------------------------------------------
-            # Point 1: Real LLM streaming via LangGraph native stream_mode.
-            #
-            # agent.astream(..., stream_mode="messages") yields (chunk, metadata)
-            # pairs where chunk is an AIMessageChunk or ToolMessage.
-            # We only push text chunks to the UI when:
-            #   - chunk is an AIMessageChunk (not a ToolMessage)
-            #   - chunk.content is a non-empty string (not tool_call metadata)
-            # This gives true token-by-token streaming of the final answer and
-            # completely skips intermediate tool-selection JSON noise.
+            # Reliable streaming: ainvoke guarantees the COMPLETE response, then
+            # we stream it to the frontend in small text chunks for the typewriter
+            # effect. Gemini+LangGraph buffers internally until LLM generation is
+            # complete before yielding, so astream gives no advantage here.
             # -------------------------------------------------------------------
-            streamed_reply = ""
 
             # Send user metadata early so frontend can set up the UI
             meta = {
@@ -285,34 +279,35 @@ async def chat_stream(
             }
             await q.put(meta)
 
-            from langchain_core.messages import AIMessageChunk
+            result = await agent.ainvoke({"messages": messages}, config=run_config)
 
-            async for chunk, _meta in agent.astream(
-                {"messages": messages},
-                stream_mode="messages",
-                config=run_config,
-            ):
-                # Only stream text tokens from the final AI answer
-                if not isinstance(chunk, AIMessageChunk):
-                    continue
-                # Skip tool-call selection chunks (they have tool_calls but no text)
-                if chunk.tool_calls or chunk.tool_call_chunks:
-                    continue
+            # Extract the last AI message
+            reply = ""
+            for msg in reversed(result.get("messages", [])):
+                if hasattr(msg, "type") and msg.type == "ai":
+                    raw = msg.content
+                    if isinstance(raw, list):
+                        reply = "".join(
+                            p.get("text", "") for p in raw
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        )
+                    else:
+                        reply = str(raw) if raw else ""
+                    break
 
-                text = ""
-                if isinstance(chunk.content, list):
-                    text = "".join(
-                        p.get("text", "") for p in chunk.content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                elif isinstance(chunk.content, str):
-                    text = chunk.content
-
-                if text:
-                    await q.put({"type": "chunk", "text": text})
-                    streamed_reply += text
-
-            reply = streamed_reply or "I'm sorry, I couldn't generate a response."
+            # -------------------------------------------------------------------
+            # Stream the complete reply in larger chunks with a slight delay.
+            # - Sending everything instantly causes the React Markdown component
+            #   to crash (white screen) when parsing massive tables synchronously.
+            # - Sending micro-chunks instantly without sleep causes React to freeze
+            #   trying to apply 500 state updates per second.
+            # - This sleep gives the browser UI thread time to breathe, creating a 
+            #   smooth typewriter effect and eliminating all lag/crashes.
+            # -------------------------------------------------------------------
+            CHUNK = 20  # larger chunk for faster table generation
+            for i in range(0, len(reply), CHUNK):
+                await q.put({"type": "chunk", "text": reply[i:i + CHUNK]})
+                await asyncio.sleep(0.01)
 
             latency_ms = (__import__("time").monotonic() - t_start) * 1000
             logger.info("chat_stream_response", user=context.user_id,

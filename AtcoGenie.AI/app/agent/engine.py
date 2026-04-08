@@ -168,11 +168,12 @@ def get_llm():
             model=settings.google_model,
             google_api_key=settings.google_api_key,
             temperature=1,
-            max_retries=2,          # Point 5: cut from 6→2 for faster failure
+            max_retries=2,
             max_output_tokens=4096,
-            streaming=True,
-            # Point 2: disable thinking budget — saves 3-5 s on every request
-            thinking={"type": "disabled"},
+            model_kwargs={
+                # Disable thinking budget to save 3-5 s per request
+                "thinking": {"thinking_budget": 0},
+            },
         )
     else:
         try:
