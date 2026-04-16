@@ -246,22 +246,41 @@ def get_agent_tools(
             if not gsums:
                 continue
 
-            sort_col = None
-            for nc in numeric_sums:
-                if any(kw in nc.lower() for kw in ["value", "amount", "revenue", "net", "sale", "price"]):
-                    sort_col = nc
-                    break
-            if sort_col is None and numeric_indices:
-                sort_col = columns[numeric_indices[0]]
+            rev_cols = [c for c in numeric_sums if any(kw in c.lower() for kw in ["value", "amount", "revenue", "net", "sale", "price"])]
+            unit_cols = [c for c in numeric_sums if any(kw in c.lower() for kw in ["unit", "qty", "quantity", "box", "pack"])]
+
+            for gval, gnums in gsums.items():
+                total_rev_col = next((c for c in rev_cols if any(kw in c.lower() for kw in ["total", "ytd", "overall"])), None)
+                total_unit_col = next((c for c in unit_cols if any(kw in c.lower() for kw in ["total", "ytd", "overall"])), None)
+                
+                if total_rev_col:
+                    gnums["_Period_Total_Revenue"] = gnums[total_rev_col]
+                else:
+                    gnums["_Period_Total_Revenue"] = sum(gnums[c] for c in rev_cols)
+                    
+                if total_unit_col:
+                    gnums["_Period_Total_Units"] = gnums[total_unit_col]
+                else:
+                    gnums["_Period_Total_Units"] = sum(gnums[c] for c in unit_cols)
 
             unique_count = len(gsums)
-            if sort_col:
-                top_groups = sorted(gsums.items(), key=lambda x: x[1].get(sort_col, 0), reverse=True)[:GROUP_TOP_N]
-                summary_parts.append(f"\n### Top {len(top_groups)} of {unique_count} unique **{gcol}** (by {sort_col}, aggregated from ALL records)")
-                for rank, (gval, gnums) in enumerate(top_groups, 1):
-                    count = group_counts[gi][gval]
-                    num_line = ", ".join(f"{k}={v:,.2f}" for k, v in list(gnums.items())[:4])
-                    summary_parts.append(f"{rank}. **{gval}** — Records: {count:,} | {num_line}")
+            top_groups = sorted(gsums.items(), key=lambda x: x[1].get("_Period_Total_Revenue", 0), reverse=True)[:GROUP_TOP_N]
+            
+            summary_parts.append(f"\n### Top {len(top_groups)} of {unique_count} unique **{gcol}** (ranked by Overall Period Revenue)")
+            for rank, (gval, gnums) in enumerate(top_groups, 1):
+                count = group_counts[gi][gval]
+                
+                rev_val = gnums.get("_Period_Total_Revenue", 0)
+                unit_val = gnums.get("_Period_Total_Units", 0)
+                
+                num_line = f"Overall Revenue: {rev_val:,.2f} | Overall Units: {unit_val:,.2f}"
+                
+                # Include all original numeric columns so the LLM has exact month-by-month values
+                orig_cols = [f"{k}={v:,.2f}" for k, v in gnums.items() if not str(k).startswith("_") and isinstance(v, (int, float))]
+                if orig_cols:
+                    num_line += f" | {', '.join(orig_cols)}"
+
+                summary_parts.append(f"{rank}. **{gval}** — Records: {count:,} | {num_line}")
 
         if total > 500:
             first_group = selected_groups[0] if selected_groups else None
@@ -317,9 +336,10 @@ def get_agent_tools(
         sample_rows = results[:100]
         numeric_cols = []
         categorical_cols = []
+        import decimal
         for col in columns:
             vals = [r.get(col) for r in sample_rows if r.get(col) is not None]
-            if vals and all(isinstance(v, (int, float)) for v in vals):
+            if vals and all(isinstance(v, (int, float, decimal.Decimal)) for v in vals):
                 numeric_cols.append(col)
             elif vals and all(isinstance(v, str) for v in vals):
                 categorical_cols.append(col)
@@ -333,11 +353,12 @@ def get_agent_tools(
         if numeric_cols:
             summary_parts.append("\n### Numeric Aggregates")
             for col in numeric_cols[:8]:
-                vals = [r[col] for r in results if isinstance(r.get(col), (int, float))]
+                vals = [r[col] for r in results if isinstance(r.get(col), (int, float, decimal.Decimal))]
                 if vals:
+                    float_vals = [float(v) for v in vals]
                     summary_parts.append(
-                        f"- **{col}**: Total={sum(vals):,.2f}, Avg={sum(vals)/len(vals):,.2f}, "
-                        f"Min={min(vals):,.2f}, Max={max(vals):,.2f}"
+                        f"- **{col}**: Total={sum(float_vals):,.2f}, Avg={sum(float_vals)/len(float_vals):,.2f}, "
+                        f"Min={min(float_vals):,.2f}, Max={max(float_vals):,.2f}"
                     )
 
         if categorical_cols:
@@ -475,11 +496,12 @@ def get_agent_tools(
                     cust_key = next((k for k in results[0] if k.lower() == "customer"), None)
                     customers = list({r.get(cust_key, "") for r in results if r.get(cust_key)}) if cust_key else []
 
+                    import decimal
                     numeric_totals = {}
                     for col in results[0]:
-                        vals = [r[col] for r in results if isinstance(r.get(col), (int, float))]
+                        vals = [r[col] for r in results if isinstance(r.get(col), (int, float, decimal.Decimal))]
                         if vals:
-                            numeric_totals[col] = sum(vals)
+                            numeric_totals[col] = sum(float(v) for v in vals)
 
                     lines = [f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})"]
                     lines.append(f"- **Records:** {len(results):,}")

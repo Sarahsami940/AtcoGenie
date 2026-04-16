@@ -295,19 +295,6 @@ async def chat_stream(
                         reply = str(raw) if raw else ""
                     break
 
-            # -------------------------------------------------------------------
-            # Stream the complete reply in larger chunks with a slight delay.
-            # - Sending everything instantly causes the React Markdown component
-            #   to crash (white screen) when parsing massive tables synchronously.
-            # - Sending micro-chunks instantly without sleep causes React to freeze
-            #   trying to apply 500 state updates per second.
-            # - This sleep gives the browser UI thread time to breathe, creating a 
-            #   smooth typewriter effect and eliminating all lag/crashes.
-            # -------------------------------------------------------------------
-            CHUNK = 20  # larger chunk for faster table generation
-            for i in range(0, len(reply), CHUNK):
-                await q.put({"type": "chunk", "text": reply[i:i + CHUNK]})
-                await asyncio.sleep(0.01)
 
             latency_ms = (__import__("time").monotonic() - t_start) * 1000
             logger.info("chat_stream_response", user=context.user_id,
@@ -316,7 +303,19 @@ async def chat_stream(
             if langfuse_cb:
                 asyncio.create_task(langfuse_cb.flush(reply))
 
-            # Send done event for backwards compatibility with older frontends
+            # -----------------------------------------------------------------
+            # Send the COMPLETE reply in a single atomic SSE event.
+            #
+            # WHY: Chunked streaming (even large chunks) triggers Chrome's
+            # background tab throttle — any repeated message handler fires at
+            # most 1Hz when the tab is hidden, causing the response to pause.
+            #
+            # A SINGLE event is not subject to throttling: the browser delivers
+            # it the moment the TCP packet arrives regardless of tab visibility.
+            # The UI typewriter animation (if any) runs client-side on the
+            # already-received full text, avoiding all background issues and
+            # making table rendering instant (one DOM paint instead of hundreds).
+            # -----------------------------------------------------------------
             await q.put({"type": "done", "reply": reply, "user": meta["user"]})
 
         except asyncio.CancelledError:
@@ -339,11 +338,13 @@ async def chat_stream(
 
         while True:
             try:
-                # Fast polling so we push chunks instantly
-                item = await asyncio.wait_for(q.get(), timeout=0.05)
+                # Poll with 100ms timeout — fast enough to detect events,
+                # not busy-wait overhead while the LLM is thinking
+                item = await asyncio.wait_for(q.get(), timeout=0.1)
             except asyncio.TimeoutError:
                 keepalive_counter += 1
-                if keepalive_counter >= 40:
+                # Every ~15s (150 × 100ms) — keeps TCP alive during LLM thinking
+                if keepalive_counter >= 150:
                     keepalive_counter = 0
                     yield ": keepalive\n\n"
                 continue
@@ -354,7 +355,8 @@ async def chat_stream(
             elif isinstance(item, dict):
                 event_type = item.get("type")
 
-                if event_type == "chunk" or event_type == "meta":
+                if event_type == "meta":
+                    # User context sent early so the UI can set up the header
                     yield f"data: {json.dumps(item)}\n\n"
 
                 elif event_type == "cancelled":
@@ -366,7 +368,7 @@ async def chat_stream(
                     break
 
                 elif event_type == "done":
-                    # Emit stream_end first, then done for compat
+                    # Single atomic event — background-tab safe, instant render
                     yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
                     yield f"data: {json.dumps(item)}\n\n"
                     break

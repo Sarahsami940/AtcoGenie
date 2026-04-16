@@ -135,6 +135,7 @@ Example format:
 4. Do not summarize without numbers.
 5. Provide specific, actionable recommendations based on the data.
 6. NEVER ask the user for a tool name, team ID, or internal system parameter — resolve these yourself.
+7. MEMORY FIRST: Before calling any database or system tool, ALWAYS check the conversation history. If the user asks to repeat or re-format results you have already provided in a previous response, DO NOT call the tool again. Reply instantly using the data already present in your chat history/memory to prevent unwanted latency.
 """
 
 
