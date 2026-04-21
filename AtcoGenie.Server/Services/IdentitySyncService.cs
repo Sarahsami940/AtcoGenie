@@ -50,7 +50,8 @@ public class IdentitySyncService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error occurred during Identity Sync. Retrying in 30 seconds...");
+                try { _logger.LogError(ex, "Error occurred during Identity Sync. Retrying in 30 seconds..."); }
+                catch { /* Logger may be disposed during shutdown */ }
                 try 
                 { 
                     await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); 
@@ -526,7 +527,8 @@ public class IdentitySyncService : BackgroundService
         }
         catch (Exception ex) 
         { 
-            _logger.LogWarning("SCRUB: Partial failure. Error: {Msg}", ex.Message); 
+            try { _logger.LogWarning("SCRUB: Partial failure. Error: {Msg}", ex.Message); }
+            catch { /* Logger itself may be disposed during shutdown — swallow safely */ }
             // Continue - the main loop will attempt to fix
         }
     }

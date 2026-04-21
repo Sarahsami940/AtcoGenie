@@ -197,14 +197,215 @@ app.MapGet("/api/schema", async (AtcoGenie.Server.Application.Services.ISchemaSe
     return await schemaService.GetSchemasAsync();
 });
 
-// MAIN GENIE API: Query endpoint
+// MAIN GENIE API: Query endpoint (returns JSON, consumes Python SSE stream internally)
 app.MapPost("/api/query", async (
     AtcoGenie.Server.Application.DTOs.GenieQueryRequest request,
-    AtcoGenie.Server.Application.Services.IGenieQueryService queryService,
+    AtcoGenie.Server.Application.Services.IChatHistoryService chatService,
+    IHttpClientFactory httpClientFactory,
+    IConnectionMultiplexer redis,
+    IConfiguration configuration,
+    ILogger<Program> logger,
     HttpContext httpContext) =>
 {
-    var response = await queryService.QueryAsync(request, httpContext.RequestAborted);
-    return response;
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var user = httpContext.User;
+    var userName = user?.Identity?.Name ?? "anonymous";
+    var adUser = userName;
+    var username = adUser.Contains('\\') ? adUser.Split('\\').Last() : adUser;
+
+    // 1. Resolve Python session token from Redis
+    var redisDb = redis.GetDatabase();
+    var userKey = $"atcogenie:user-token:{username.ToLower()}";
+    var sessionToken = (string?)await redisDb.StringGetAsync(userKey);
+
+    if (string.IsNullOrEmpty(sessionToken))
+    {
+        // Auto-provision session inline
+        try
+        {
+            using var scope = app.Services.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<ImdDbContext>();
+            var rights = await dbContext.UserFormRights
+                .Where(u => u.SamAccountName.ToLower() == username.ToLower())
+                .ToListAsync(httpContext.RequestAborted);
+
+            object sessionPayload;
+            if (rights.Any())
+            {
+                var primaryUser = rights.First();
+                sessionPayload = new
+                {
+                    ad_user_id = primaryUser.SamAccountName ?? username,
+                    employee_id = primaryUser.HcmsEmployeeId,
+                    email = primaryUser.Email,
+                    display_name = primaryUser.DisplayName,
+                    department = "N/A",
+                    form_rights = rights.Select(r => new
+                    {
+                        security_user_id = r.SecurityUserId,
+                        ccode = r.CCode,
+                        application_code = r.ApplicationCode,
+                        form_id = r.FormId,
+                        add_mode = r.AddMode,
+                        edit_mode = r.EditMode,
+                        view_mode = r.ViewMode,
+                        delete_mode = r.DeleteMode
+                    }).ToList()
+                };
+            }
+            else
+            {
+                sessionPayload = new
+                {
+                    ad_user_id = username,
+                    employee_id = "DEV-001",
+                    email = $"{username}@atcolab.local",
+                    display_name = $"{username} (Dev Override)",
+                    department = "IT",
+                    form_rights = new[]
+                    {
+                        new { security_user_id = 1, ccode = "01", application_code = "PharmaCRM", form_id = "Report1_Placeholder", add_mode = false, edit_mode = false, view_mode = true, delete_mode = false }
+                    }
+                };
+            }
+
+            var newSessionId = Guid.NewGuid().ToString("N");
+            var sessionKey = $"atcogenie:session:{newSessionId}";
+            await redisDb.StringSetAsync(sessionKey, System.Text.Json.JsonSerializer.Serialize(sessionPayload), TimeSpan.FromMinutes(60));
+            await redisDb.StringSetAsync(userKey, newSessionId, TimeSpan.FromMinutes(60));
+            sessionToken = newSessionId;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to auto-provision session for {User}", username);
+            stopwatch.Stop();
+            return Results.Ok(new { success = true, data = (object?)null, message = "Session initialization failed. Please refresh.", metadata = new { executionTimeMs = stopwatch.Elapsed.TotalMilliseconds } });
+        }
+    }
+
+    // 2. Build chat history
+    var chatHistory = new List<object>();
+    if (request.SessionId.HasValue)
+    {
+        var session = await chatService.GetSessionAsync(request.SessionId.Value);
+        if (session?.Messages != null)
+        {
+            chatHistory = session.Messages
+                .OrderByDescending(m => m.Timestamp)
+                .Take(10)
+                .OrderBy(m => m.Timestamp)
+                .Select(m => (object)new
+                {
+                    role = m.Sender == "user" ? "user" : "assistant",
+                    content = m.Content
+                })
+                .ToList();
+        }
+    }
+
+    // 3. Forward to Python AI Engine — consume SSE stream efficiently
+    var aiEngineUrl = configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000";
+    var client = httpClientFactory.CreateClient("AiEngine");
+    client.BaseAddress = new Uri(aiEngineUrl);
+    client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
+
+    var payload = new { message = request.Prompt, chat_history = chatHistory };
+    var jsonPayload = System.Text.Json.JsonSerializer.Serialize(payload);
+    var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
+    {
+        Content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json")
+    };
+    httpRequest.Headers.Add("Authorization", $"Bearer {sessionToken}");
+
+    string replyText = "";
+
+    try
+    {
+        var httpResponse = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, httpContext.RequestAborted);
+        
+        httpContext.Response.ContentType = "text/event-stream";
+        httpContext.Response.Headers.Append("Cache-Control", "no-cache");
+        httpContext.Response.Headers.Append("Connection", "keep-alive");
+
+        if (!httpResponse.IsSuccessStatusCode)
+        {
+            var errorBody = await httpResponse.Content.ReadAsStringAsync(httpContext.RequestAborted);
+            logger.LogError("AI Engine returned {Status}: {Body}", httpResponse.StatusCode, errorBody);
+            await httpContext.Response.WriteAsync("data: {\"type\":\"error\", \"reply\":\"AI Engine error (" + httpResponse.StatusCode + ").\"}\n\n", httpContext.RequestAborted);
+            return Results.Empty;
+        }
+
+        using var stream = await httpResponse.Content.ReadAsStreamAsync(httpContext.RequestAborted);
+        using var reader = new System.IO.StreamReader(stream);
+
+        while (!reader.EndOfStream && !httpContext.RequestAborted.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(httpContext.RequestAborted);
+            if (line == null) break;
+
+            await httpContext.Response.WriteAsync(line + "\n", httpContext.RequestAborted);
+            
+            if (string.IsNullOrEmpty(line))
+            {
+                await httpContext.Response.Body.FlushAsync(httpContext.RequestAborted);
+            }
+
+            if (line.StartsWith("data: "))
+            {
+                try
+                {
+                    var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(line[6..]);
+                    if (json.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "done" && json.TryGetProperty("reply", out var replyProp))
+                    {
+                        replyText = replyProp.GetString() ?? "";
+                    }
+                }
+                catch { }
+            }
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        return Results.Empty;
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Query proxy failed for {User}: {Error}", username, ex.Message);
+        if (!httpContext.Response.HasStarted)
+        {
+            httpContext.Response.ContentType = "text/event-stream";
+            await httpContext.Response.WriteAsync("data: {\"type\":\"error\", \"reply\":\"An unexpected proxy error occurred.\"}\n\n");
+        }
+        return Results.Empty;
+    }
+
+    stopwatch.Stop();
+
+    // 4. Persist chat history
+    if (request.SessionId.HasValue && !string.IsNullOrWhiteSpace(replyText))
+    {
+        try
+        {
+            var sessionId = request.SessionId.Value;
+            await chatService.AddMessageAsync(sessionId, "user", request.Prompt);
+            await chatService.AddMessageAsync(sessionId, "bot", replyText);
+
+            var currentSession = await chatService.GetSessionAsync(sessionId);
+            if (currentSession != null && (currentSession.Title == "New Chat" || string.IsNullOrWhiteSpace(currentSession.Title)))
+            {
+                var newTitle = request.Prompt.Split('\n')[0];
+                if (newTitle.Length > 40) newTitle = newTitle[..40] + "...";
+                if (string.IsNullOrWhiteSpace(newTitle)) newTitle = "Chat";
+                await chatService.RenameSessionAsync(sessionId, newTitle);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to persist chat history for {User}", username);
+        }
+    }
+
+    return Results.Empty;
 });
 
 // --- CHAT HISTORY API ---

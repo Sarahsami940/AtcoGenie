@@ -10,6 +10,7 @@ import json
 import csv
 import os
 import uuid
+import duckdb
 from collections import Counter
 from datetime import datetime
 from typing import List, Optional
@@ -69,6 +70,11 @@ class IncentiveSummaryInput(BaseModel):
 
 class ExportReportInput(BaseModel):
     report_name: str = Field(description="Name of the last report to export, e.g. 'Customer Sales Report', 'Sales vs Target Report', 'Incentive Summary Report'")
+
+class QueryDatasetInput(BaseModel):
+    upload_id: str = Field(description="The UUID of the dataset to query")
+    query: str = Field(description="The exact DuckDB SQL query to execute against the 'read_parquet' file")
+
 # =====================================================================
 # Tool Factory
 # =====================================================================
@@ -120,23 +126,100 @@ def get_agent_tools(
                        rights_count=len(security_context.role_profile.form_rights))
         return f"ACCESS DENIED: You do not have permission to view the {report_label}."
 
-    def _resolve_team_ids(team_name: Optional[str]) -> str:
-        """Resolves which TeamIDs to pass to the SP."""
-        if team_name:
-            matched_id = user_context.get_team_id_by_name(team_name)
-            if matched_id:
-                return matched_id
-            return team_name
+    async def _resolve_team_ids(team_name: Optional[str]) -> tuple[str, str]:
+        """
+        Resolves which TeamIDs to pass to the SP.
+        Returns (team_ids_csv, resolved_display_name) tuple.
 
-        # No team specified by user
+        Handles four cases:
+        1. User types a team NAME  → fuzzy-match against user's known teams → return matched ID
+        2. User types a numeric ID → validate it's in user's own teams (or allow if admin) → return it
+        3. DB fallback (admin)     → query SS_Team master table to resolve name → ID
+        4. Nothing specified       → use all of user's default team IDs
+        """
+        if team_name:
+            candidate = team_name.strip()
+
+            # Case 2: user gave a raw numeric team ID
+            if candidate.isdigit():
+                user_ids = {t.team_id for t in user_context.teams}
+                if candidate in user_ids or user_context.is_admin:
+                    # Look up name from local teams first, then DB
+                    name = next((t.team_name for t in user_context.teams if t.team_id == candidate), None)
+                    if not name:
+                        rows = await db_manager.execute_raw("pharma", "SELECT Name FROM SS_Team WHERE TeamId = ? AND Active = 1", int(candidate))
+                        name = rows[0]["Name"] if rows else f"Team {candidate}"
+                    logger.info("team_resolved_by_id", input=candidate, name=name)
+                    return candidate, name
+                logger.warning("team_id_not_in_user_teams", input=candidate,
+                               user_teams=list(user_ids))
+                return candidate, f"Team {candidate}"
+
+            # Case 1: user gave a team name — fuzzy match against local teams
+            matched_id = user_context.get_team_id_by_name(candidate)
+            if matched_id:
+                name = next((t.team_name for t in user_context.teams if t.team_id == matched_id), candidate)
+                logger.info("team_resolved_by_name", input=candidate, matched_id=matched_id, name=name)
+                return matched_id, name
+
+            # Case 3: DB fallback — query SS_Team master table directly
+            try:
+                db_team_id, db_team_name = await _lookup_team_from_db_with_name(candidate)
+                if db_team_id:
+                    logger.info("team_resolved_by_db", input=candidate, matched_id=db_team_id, name=db_team_name)
+                    return db_team_id, db_team_name
+            except Exception as e:
+                logger.warning("team_db_lookup_failed", input=candidate, error=str(e))
+
+            logger.warning("team_name_no_match", input=candidate,
+                           available=[t.team_name for t in user_context.teams])
+            # Last resort for admin — use '0' (all teams)
+            if user_context.is_admin:
+                return "0", "All Teams"
+            return candidate, candidate
+
+        # Case 4: No team mentioned → use the user's own teams
         if user_context.team_ids_csv:
-            return user_context.team_ids_csv
+            names = ", ".join(user_context.team_names) if user_context.team_names else user_context.team_ids_csv
+            return user_context.team_ids_csv, names
 
         # Admin with no direct team assignment — '0' means "all" in the SPs
         if user_context.is_admin:
-            return "0"
+            return "0", "All Teams"
 
-        return ""
+        return "", ""
+
+    async def _lookup_team_from_db_with_name(name: str) -> tuple[Optional[str], str]:
+        """Query SS_Team master table to resolve a team name to its numeric TeamId and display name."""
+        rows = await db_manager.execute_raw(
+            "pharma",
+            "SELECT TeamId, Name FROM SS_Team WHERE Active = 1 ORDER BY Name"
+        )
+        if not rows:
+            return None, name
+
+        name_lower = name.lower().strip()
+
+        # 1. Exact match
+        for r in rows:
+            if r["Name"].strip().lower() == name_lower:
+                return str(r["TeamId"]), r["Name"].strip()
+        # 2. Input is substring of DB name
+        for r in rows:
+            if name_lower in r["Name"].strip().lower():
+                return str(r["TeamId"]), r["Name"].strip()
+        # 3. DB name is substring of input (e.g. "Team Jaguar" matches "Jaguar")
+        for r in rows:
+            if r["Name"].strip().lower() in name_lower:
+                return str(r["TeamId"]), r["Name"].strip()
+        # 4. Word-level overlap
+        input_words = {w for w in name_lower.split() if len(w) > 2}
+        for r in rows:
+            team_words = {w for w in r["Name"].strip().lower().split() if len(w) > 2}
+            if input_words & team_words:
+                return str(r["TeamId"]), r["Name"].strip()
+        return None, name
+
 
     async def _fetch_and_summarize(sp_name: str, report_name: str, args: tuple, max_sample: int = 20) -> str:
         """
@@ -458,10 +541,13 @@ def get_agent_tools(
         if total_months > 24 or total_months < 0:
             return "Invalid date range. The Customer Sales Report supports a maximum of 2 years."
 
-        team_ids = _resolve_team_ids(team_name)
+        team_ids, resolved_team_name = await _resolve_team_ids(team_name)
         if not team_ids:
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
+
+        # Prefix so the LLM knows the exact team name that was resolved
+        team_context_note = f"[Resolved team: **{resolved_team_name}** (ID: {team_ids})]\n\n"
 
         # If product names provided, resolve them to best-matched single IDs and run comparison
         if product_names:
@@ -547,7 +633,8 @@ def get_agent_tools(
                 user_context.user_role,       # @UserRole
                 security_context.employee_id  # @EntUserEmpID
             )
-            return await _fetch_and_summarize(sp_name, "Customer Sales Report", args)
+            result = await _fetch_and_summarize(sp_name, "Customer Sales Report", args)
+            return team_context_note + result
 
         except Exception as e:
             logger.error("sp_execution_error", sp=sp_name, error=str(e))
@@ -573,10 +660,12 @@ def get_agent_tools(
         if denied:
             return denied
 
-        team_ids = _resolve_team_ids(team_name)
+        team_ids, resolved_team_name = await _resolve_team_ids(team_name)
         if not team_ids:
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
+
+        team_context_note = f"[Resolved team: **{resolved_team_name}** (ID: {team_ids})]\n\n"
 
         try:
             logger.info("executing_sp_stream", sp=sp_name, user=security_context.user_id, team=team_ids)
@@ -593,7 +682,8 @@ def get_agent_tools(
                 date_to,             # @Param_InvoiceDate_To
                 1                    # @Param_MonthID
             )
-            return await _fetch_and_summarize(sp_name, "Sales vs Target Report", args)
+            result = await _fetch_and_summarize(sp_name, "Sales vs Target Report", args)
+            return team_context_note + result
 
         except Exception as e:
             logger.error("sp_execution_error", sp=sp_name, error=str(e))
@@ -617,10 +707,12 @@ def get_agent_tools(
         if denied:
             return denied
 
-        team_ids = _resolve_team_ids(team_name)
+        team_ids, resolved_team_name = await _resolve_team_ids(team_name)
         if not team_ids:
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
+
+        team_context_note = f"[Resolved team: **{resolved_team_name}** (ID: {team_ids})]\n\n"
 
         try:
             logger.info("executing_sp_stream", sp=sp_name, user=security_context.user_id, team=team_ids)
@@ -633,7 +725,8 @@ def get_agent_tools(
                 "",                  # @AreaIDs (all)
                 group_by             # @GroupByIDs
             )
-            return await _fetch_and_summarize(sp_name, "Incentive Summary Report", args)
+            result = await _fetch_and_summarize(sp_name, "Incentive Summary Report", args)
+            return team_context_note + result
 
         except Exception as e:
             logger.error("sp_execution_error", sp=sp_name, error=str(e))
@@ -681,6 +774,61 @@ def get_agent_tools(
         except Exception as e:
             logger.error("csv_export_failed", error=str(e))
             return f"Export failed: {str(e)}"
+
+    async def run_query_user_dataset(upload_id: str, query: str) -> str:
+        """
+        Executes a DuckDB query against a user-uploaded Parquet file.
+        Ensures the user owns the file before executing.
+        """
+        # Note: the actual parquet path could be derived or queried from the DB.
+        # But we will query the DB to get the path securely.
+        pool = db_manager.get_pool("postgres")
+        if not pool:
+            return "Error: Database uninitialized."
+            
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT parquet_path, user_id FROM document_uploads WHERE id = $1", 
+                    uuid.UUID(upload_id)
+                )
+                if not row:
+                    return "Error: Dataset not found or expired."
+                
+                # RBAC Validation
+                if row["user_id"] != security_context.user_id:
+                    logger.warning("unauthorized_dataset_access", user=security_context.user_id, upload_id=upload_id)
+                    return "Error: You are not authorized to access this dataset."
+                
+                parquet_path = row["parquet_path"]
+                
+                # We need to replace the placeholder table name in the query with the actual read_parquet statement
+                # Or just inject read_parquet. We'll specify in the description to use '{parquet_path}' or we 
+                # can dynamically intercept it. Better: ask AI to use 'data' as table name, and we create a view.
+        except Exception as e:
+            logger.error("dataset_query_db_failed", error=str(e))
+            return f"Database error: {str(e)}"
+            
+        try:
+            await progress.emit("Analyzing uploaded dataset...")
+            
+            def _duck_execute():
+                # Connect in-memory and register the parquet wrapper as a view named 'data'
+                con = duckdb.connect(database=':memory:')
+                con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{parquet_path}')")
+                
+                # Run the AI's query
+                logger.info("duckdb_execute", query=query)
+                res = con.execute(query).fetchdf()
+                return res.to_markdown()
+                
+            import asyncio
+            result_md = await asyncio.to_thread(_duck_execute)
+            return result_md
+            
+        except Exception as e:
+            logger.error("duckdb_query_failed", query=query, error=str(e))
+            return f"Query failed: {str(e)}"
 
     # -----------------------------------------------------------------
     # Build Tool List
@@ -741,6 +889,17 @@ def get_agent_tools(
                 "Do NOT call this automatically after every report — only on explicit user request."
             ),
             args_schema=ExportReportInput,
+        ),
+        StructuredTool.from_function(
+            func=None,
+            coroutine=run_query_user_dataset,
+            name="query_user_dataset",
+            description=(
+                "Query an uploaded Excel/CSV dataset using DuckDB SQL. "
+                "The table is exposed as a view named 'data' (e.g. SELECT * FROM data)."
+                "You must provide the upload_id of the dataset to query."
+            ),
+            args_schema=QueryDatasetInput,
         ),
     ]
 

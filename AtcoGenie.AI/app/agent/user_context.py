@@ -44,14 +44,31 @@ class ResolvedUserContext:
         return [t.team_name for t in self.teams]
 
     def get_team_id_by_name(self, name: str) -> Optional[str]:
-        """Fuzzy match a team name from user prompt to a TeamID."""
+        """
+        Resolves a team ID from a user-supplied name. Tries four strategies in order:
+        1. Exact match (case-insensitive)
+        2. User input is a substring of the team name (e.g. 'alpha' matches 'Team Alpha')
+        3. Team name is a substring of user input (e.g. 'Team Jaguar' matches team 'Jaguar')
+        4. Any word in user input matches any word in team name
+        """
         name_lower = name.strip().lower()
+        # 1. Exact
         for t in self.teams:
             if t.team_name.strip().lower() == name_lower:
                 return t.team_id
-        # Partial match fallback
+        # 2. Input contained in team name
         for t in self.teams:
             if name_lower in t.team_name.strip().lower():
+                return t.team_id
+        # 3. Team name contained in input (handles "Team Jaguar" → "Jaguar")
+        for t in self.teams:
+            if t.team_name.strip().lower() in name_lower:
+                return t.team_id
+        # 4. Word-level overlap (any meaningful word match)
+        input_words = {w for w in name_lower.split() if len(w) > 2}  # skip short words like 'of', 'the'
+        for t in self.teams:
+            team_words = {w for w in t.team_name.strip().lower().split() if len(w) > 2}
+            if input_words & team_words:  # non-empty intersection
                 return t.team_id
         return None
 

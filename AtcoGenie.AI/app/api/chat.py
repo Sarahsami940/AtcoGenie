@@ -45,6 +45,40 @@ def _get_role_cache(request: Request) -> RoleCache:
     return request.app.state.role_cache
 
 
+async def _get_active_datasets(user_id: str, db_manager: DatabaseManager) -> str:
+    pool = db_manager.get_pool("postgres")
+    if not pool:
+        return ""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, filename, schema_json FROM document_uploads 
+                WHERE user_id = $1 AND expires_at > CURRENT_TIMESTAMP
+                """, user_id
+            )
+            if not rows:
+                return ""
+            
+            datasets = []
+            for r in rows:
+                schema = r["schema_json"]
+                try: 
+                    import json
+                    schema = json.loads(schema) if isinstance(schema, str) else schema
+                    cols = list(schema.keys())
+                except:
+                    cols = []
+                datasets.append(f"- '{r['filename']}' (ID: {r['id']}). Columns: {cols}")
+            
+            if datasets:
+                return "The user has the following active dataset(s) available for analysis:\n" + "\n".join(datasets) + "\nTo query them, use the `query_user_dataset` tool passing the exact ID and a DuckDB SQL query string."
+            return ""
+    except Exception as e:
+        logger.error("fetch_active_datasets_failed", error=str(e))
+        return ""
+
+
 @router.post("/", response_model=Dict[str, Any])
 async def chat(
     req: ChatRequest,
@@ -83,6 +117,9 @@ async def chat(
 
         # Build messages input for the agent graph
         messages = []
+        dataset_info = await _get_active_datasets(context.user_id, db_manager)
+        if dataset_info:
+            messages.append({"role": "system", "content": dataset_info})
 
         # Add chat history if provided
         for msg in req.chat_history:
@@ -114,25 +151,10 @@ async def chat(
 
         t_start = __import__("time").monotonic()
         try:
-            result = await asyncio.wait_for(
-                agent.ainvoke({"messages": messages}, config=run_config),
-                timeout=300  # 300s (5 min) — SP ~25s + thinking LLM ~90s + buffer
-            )
-        except asyncio.TimeoutError:
-            logger.warning("agent_timeout", user=context.user_id, timeout_s=300)
-            return {
-                "reply": (
-                    "⏳ This analysis is taking longer than expected (>5 minutes). "
-                    "This can happen with very large datasets or complex queries. Try a **shorter date range** "
-                    "or a **more specific filter** (e.g., a single team or product)."
-                ),
-                "user": {
-                    "display_name": context.display_name,
-                    "role": user_context.user_role,
-                    "teams": user_context.team_names,
-                    "is_admin": user_context.is_admin,
-                }
-            }
+            result = await agent.ainvoke({"messages": messages}, config=run_config)
+        except asyncio.CancelledError:
+            logger.warning("agent_cancelled_by_client", user=context.user_id)
+            raise
         # Extract the last AI message from the response
         response_messages = result.get("messages", [])
         reply = ""
@@ -230,9 +252,23 @@ async def chat_stream(
     progress_bus.set_queue(q)
 
     async def run_agent():
-        """Runs the LangChain agent using astream_events for real-time text generation."""
+        """
+        Streams tokens in real-time from the LangGraph agent via astream_events v2.
+
+        Architecture:
+        - Uses astream_events(version='v2') which yields tokens as Gemini generates them.
+        - Tokens are batched into ~50-char chunks before being enqueued to prevent
+          the frontend React renderer from re-rendering+re-parsing markdown 500×/sec.
+        - A canonical 'done' event containing the full reply is sent at the end so
+          the frontend can replace the streaming buffer with the authoritative text.
+        - Progress messages (tool calls, SP execution) are sent as 'status' events.
+        """
         try:
             messages = []
+            dataset_info = await _get_active_datasets(context.user_id, db_manager)
+            if dataset_info:
+                messages.append({"role": "system", "content": dataset_info})
+
             for msg in req.chat_history:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
@@ -258,16 +294,7 @@ async def chat_stream(
                 langfuse_cb = cb
                 run_config["callbacks"] = [cb]
 
-            t_start = __import__("time").monotonic()
-
-            # -------------------------------------------------------------------
-            # Reliable streaming: ainvoke guarantees the COMPLETE response, then
-            # we stream it to the frontend in small text chunks for the typewriter
-            # effect. Gemini+LangGraph buffers internally until LLM generation is
-            # complete before yielding, so astream gives no advantage here.
-            # -------------------------------------------------------------------
-
-            # Send user metadata early so frontend can set up the UI
+            # Send user metadata first so the UI can set up the header
             meta = {
                 "type": "meta",
                 "user": {
@@ -279,23 +306,56 @@ async def chat_stream(
             }
             await q.put(meta)
 
-            result = await agent.ainvoke({"messages": messages}, config=run_config)
+            t_start = __import__("time").monotonic()
+            full_reply = []
+            token_buffer = []
+            BATCH_CHARS = 50  # flush a chunk every ~50 chars to balance TTFT vs re-render cost
 
-            # Extract the last AI message
-            reply = ""
-            for msg in reversed(result.get("messages", [])):
-                if hasattr(msg, "type") and msg.type == "ai":
-                    raw = msg.content
+            async for event in agent.astream_events(
+                {"messages": messages},
+                config=run_config,
+                version="v2",
+            ):
+                kind = event.get("event", "")
+
+                # Real LLM token from the final AI response node
+                if kind == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk is None:
+                        continue
+                    # LangChain AIMessageChunk: content may be str or list-of-parts
+                    raw = chunk.content if hasattr(chunk, "content") else ""
                     if isinstance(raw, list):
-                        reply = "".join(
+                        text = "".join(
                             p.get("text", "") for p in raw
                             if isinstance(p, dict) and p.get("type") == "text"
                         )
                     else:
-                        reply = str(raw) if raw else ""
-                    break
+                        text = str(raw) if raw else ""
 
+                    if not text:
+                        continue
 
+                    full_reply.append(text)
+                    token_buffer.append(text)
+
+                    # Flush when batch threshold reached
+                    if sum(len(t) for t in token_buffer) >= BATCH_CHARS:
+                        token_buffer.clear()
+                        # Send accumulated full_reply up to this point as a 'partial_done' event 
+                        # because the frontend React app might only listen to 'done'.
+                        await q.put({"type": "partial_done", "reply": "".join(full_reply), "user": meta["user"]})
+
+                # Tool call start (e.g. "Fetching customer sales data...")
+                elif kind == "on_tool_start":
+                    tool_name = event.get("name", "")
+                    await q.put({"type": "status", "message": f"Running {tool_name}..."})
+
+            # Flush any remaining buffered tokens
+            if token_buffer:
+                await q.put({"type": "partial_done", "reply": "".join(full_reply), "user": meta["user"]})
+
+            reply = "".join(full_reply)
             latency_ms = (__import__("time").monotonic() - t_start) * 1000
             logger.info("chat_stream_response", user=context.user_id,
                         reply_length=len(reply), latency_ms=round(latency_ms))
@@ -303,26 +363,17 @@ async def chat_stream(
             if langfuse_cb:
                 asyncio.create_task(langfuse_cb.flush(reply))
 
-            # -----------------------------------------------------------------
-            # Send the COMPLETE reply in a single atomic SSE event.
-            #
-            # WHY: Chunked streaming (even large chunks) triggers Chrome's
-            # background tab throttle — any repeated message handler fires at
-            # most 1Hz when the tab is hidden, causing the response to pause.
-            #
-            # A SINGLE event is not subject to throttling: the browser delivers
-            # it the moment the TCP packet arrives regardless of tab visibility.
-            # The UI typewriter animation (if any) runs client-side on the
-            # already-received full text, avoiding all background issues and
-            # making table rendering instant (one DOM paint instead of hundreds).
-            # -----------------------------------------------------------------
+            # Send canonical full reply so frontend replaces the stream buffer
+            # with the authoritative text (avoids any off-by-one token issues)
             await q.put({"type": "done", "reply": reply, "user": meta["user"]})
 
         except asyncio.CancelledError:
             logger.info("agent_task_cancelled", user=context.user_id)
             await q.put({"type": "cancelled"})
         except Exception as e:
+            import traceback
             err_str = str(e)
+            logger.error("agent_stream_failed", user=context.user_id, error=traceback.format_exc())
             if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
                 err_reply = "⏳ I'm temporarily rate-limited. Please wait 30–60 seconds and try again."
             else:
@@ -335,18 +386,24 @@ async def chat_stream(
         yield f"data: {json.dumps({'type': 'status', 'message': 'Thinking...'})}\n\n"
 
         keepalive_counter = 0
+        total_ticks = 0
+        prompt_shown = False
 
         while True:
             try:
-                # Poll with 100ms timeout — fast enough to detect events,
-                # not busy-wait overhead while the LLM is thinking
                 item = await asyncio.wait_for(q.get(), timeout=0.1)
             except asyncio.TimeoutError:
                 keepalive_counter += 1
-                # Every ~15s (150 × 100ms) — keeps TCP alive during LLM thinking
-                if keepalive_counter >= 150:
+                total_ticks += 1
+                if keepalive_counter >= 150:  # ~15s keepalive cadence
                     keepalive_counter = 0
                     yield ": keepalive\n\n"
+                    
+                if total_ticks >= 6000 and not prompt_shown: # 10 mins = 600 seconds = 6000 ticks of 0.1s
+                    prompt_shown = True
+                    timeout_msg = "⏳ This is taking longer than 10 mins. Would you like to proceed or stop and query with a shorter range or filter by team id?"
+                    yield f"data: {json.dumps({'type': 'status', 'message': timeout_msg})}\n\n"
+                    
                 continue
 
             if isinstance(item, str):
@@ -356,7 +413,18 @@ async def chat_stream(
                 event_type = item.get("type")
 
                 if event_type == "meta":
-                    # User context sent early so the UI can set up the header
+                    yield f"data: {json.dumps(item)}\n\n"
+
+                elif event_type == "partial_done":
+                    # Send a fake 'done' event so the frontend progressively renders
+                    msg = {"type": "done", "reply": item.get("reply"), "user": item.get("user")}
+                    yield f"data: {json.dumps(msg)}\n\n"
+
+                elif event_type == "chunk":
+                    # Real-time token chunk — frontend appends this to the message buffer
+                    yield f"data: {json.dumps(item)}\n\n"
+
+                elif event_type == "status":
                     yield f"data: {json.dumps(item)}\n\n"
 
                 elif event_type == "cancelled":
@@ -368,17 +436,12 @@ async def chat_stream(
                     break
 
                 elif event_type == "done":
-                    # Single atomic event — background-tab safe, instant render
+                    # Canonical full reply — closes the stream
                     yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
                     yield f"data: {json.dumps(item)}\n\n"
                     break
 
-        # Cleanup
         progress_bus.set_queue(asyncio.Queue())
-        # We do NOT cancel the background task here anymore.
-        # This fixes the bug where mobile Chrome/Safari sleeping a tab 
-        # caused FastAPI to throttle and erroneously terminate the task.
-        # The background task will just finish cleanly and its output to `q` gets GC'd.
 
     return StreamingResponse(
         event_generator(),
