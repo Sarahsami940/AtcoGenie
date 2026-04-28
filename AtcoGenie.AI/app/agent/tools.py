@@ -13,6 +13,7 @@ import uuid
 import duckdb
 from collections import Counter
 from datetime import datetime
+import asyncio
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
@@ -27,10 +28,10 @@ logger = get_logger(__name__)
 
 
 # =====================================================================
-# In-Memory Last-Result Cache (per tool call, keyed by report+args)
-# Allows the export tool to re-query without user re-describing parameters
+# In-Memory Last-Result Cache — keyed by user_id
+# Each user gets their own entry so concurrent users never overwrite each other.
 # =====================================================================
-_last_report_params: dict = {}  # e.g. {"report": "customer_sales", "args": (...)}
+_last_report_params: dict = {}  # {user_id: {"sp_name": ..., "args": ..., ...}}
 
 
 # =====================================================================
@@ -74,6 +75,68 @@ class ExportReportInput(BaseModel):
 class QueryDatasetInput(BaseModel):
     upload_id: str = Field(description="The UUID of the dataset to query")
     query: str = Field(description="The exact DuckDB SQL query to execute against the 'read_parquet' file")
+
+
+class AggregatedSalesInput(BaseModel):
+    date_from: str = Field(description="Start date in YYYY/MM/DD format, e.g. '2024/07/01'. Earliest available: 2024/07/01.")
+    date_to: str = Field(description="End date in YYYY/MM/DD format, e.g. '2026/06/30'.")
+    team_name: Optional[str] = Field(default=None, description="Team name or ID to filter by. Leave empty to use the user's assigned team(s).")
+    product_id: Optional[str] = Field(default="", description="Product ID filter. Empty string for all products.")
+    territory_id: Optional[str] = Field(default="", description="Territory ID filter. Empty string for all territories.")
+    sales_channel: Optional[str] = Field(default="1", description="Sales channel code. Default is '1'.")
+
+
+# =====================================================================
+# Fiscal Year Splitter (module-level utility)
+# =====================================================================
+
+def _split_into_fiscal_years(date_from: str, date_to: str) -> list:
+    """
+    Given a user's date range, returns the FULL fiscal year boundaries needed
+    to query Sp_PharmaCRM_SVT.
+
+    CRITICAL: The SP uses exact equality matching on FiscalYearFromDate/FiscalYearToDate,
+    so we MUST always pass full boundaries (Jul 1 → Jun 30), never partial months.
+
+    Returns list of (fy_label, fy_start_str, fy_end_str, user_range_note) tuples.
+    user_range_note tells the LLM which months within this FY the user actually cares about.
+    """
+    start = datetime.strptime(date_from, "%Y/%m/%d")
+    end = datetime.strptime(date_to, "%Y/%m/%d")
+
+    fy_start_year = start.year if start.month >= 7 else start.year - 1
+
+    windows = []
+    while True:
+        fy_start = datetime(fy_start_year, 7, 1)
+        fy_end = datetime(fy_start_year + 1, 6, 30)
+
+        if fy_start > end:
+            break
+
+        # Only include if this FY overlaps the user's range
+        if fy_end >= start:
+            label = f"FY {fy_start_year}/{fy_start_year + 1}"
+
+            # Compute which months within this FY the user actually requested
+            overlap_start = max(start, fy_start)
+            overlap_end = min(end, fy_end)
+            if overlap_start == fy_start and overlap_end == fy_end:
+                range_note = "Full fiscal year"
+            else:
+                range_note = f"User requested: {overlap_start.strftime('%b %Y')} – {overlap_end.strftime('%b %Y')}"
+
+            windows.append((
+                label,
+                fy_start.strftime("%Y/%m/%d"),   # ALWAYS full FY start
+                fy_end.strftime("%Y/%m/%d"),      # ALWAYS full FY end
+                range_note,
+            ))
+
+        fy_start_year += 1
+
+    return windows
+
 
 # =====================================================================
 # Tool Factory
@@ -126,6 +189,43 @@ def get_agent_tools(
                        rights_count=len(security_context.role_profile.form_rights))
         return f"ACCESS DENIED: You do not have permission to view the {report_label}."
 
+    # Cache for admin all-teams lookup within a single request
+    _all_team_ids_cache: list[str] = []
+
+    # Semaphore to serialize SVT SP calls.
+    # Sp_PharmaCRM_SVT uses a global temp table (##TerritoryIds) which collides
+    # when two pyodbc connections execute the SP simultaneously.
+    # Semaphore(1) acts as a mutex — guaranteed serialization regardless of
+    # how the async event loop schedules the coroutines.
+    _svt_semaphore = asyncio.Semaphore(1)
+
+
+    async def _fetch_all_team_ids_csv() -> tuple[str, str]:
+        """Fetches all active team IDs from SS_Team and returns (csv, display_name).
+        Result is cached within this tool-factory closure so repeated calls in the
+        same request don't hit the DB twice.
+        """
+        if _all_team_ids_cache:
+            csv = ",".join(_all_team_ids_cache)
+            return csv, "All Teams"
+        try:
+            rows = await db_manager.execute_raw(
+                "pharma",
+                "SELECT TeamId, Name FROM SS_Team WHERE Active = 1 ORDER BY TeamId"
+            )
+            if rows:
+                ids = [str(r["TeamId"]) for r in rows]
+                _all_team_ids_cache.extend(ids)
+                csv = ",".join(ids)
+                logger.info("admin_all_teams_fetched", count=len(ids))
+                return csv, "All Teams"
+        except Exception as e:
+            logger.error("admin_all_teams_fetch_error", error=str(e))
+        # Final fallback — empty means SP returns all in some SPs, but user said this
+        # doesn't work; log a warning so we can track it.
+        logger.warning("admin_all_teams_fetch_failed_fallback")
+        return "", "All Teams"
+
     async def _resolve_team_ids(team_name: Optional[str]) -> tuple[str, str]:
         """
         Resolves which TeamIDs to pass to the SP.
@@ -136,11 +236,18 @@ def get_agent_tools(
         2. User types a numeric ID → validate it's in user's own teams (or allow if admin) → return it
         3. DB fallback (admin)     → query SS_Team master table to resolve name → ID
         4. Nothing specified       → use all of user's default team IDs
+                                     Admin with no team specified → ALL teams as CSV from DB
         """
         if team_name:
             candidate = team_name.strip()
 
             # Case 2: user gave a raw numeric team ID
+            # Special case: "0" is not a real team ID — admin intent is "all teams".
+            # SVT SP natively treats '' as all-teams; passing a CSV causes partial data.
+            if candidate == "0" and user_context.is_admin:
+                logger.info("admin_all_teams_empty_string", reason="0_sentinel")
+                return "", "All Teams"
+
             if candidate.isdigit():
                 user_ids = {t.team_id for t in user_context.teams}
                 if candidate in user_ids or user_context.is_admin:
@@ -173,9 +280,10 @@ def get_agent_tools(
 
             logger.warning("team_name_no_match", input=candidate,
                            available=[t.team_name for t in user_context.teams])
-            # Last resort for admin — use '0' (all teams)
+            # Last resort for admin — empty string = all teams (SP handles natively)
             if user_context.is_admin:
-                return "0", "All Teams"
+                logger.info("admin_all_teams_empty_string", reason="name_no_match")
+                return "", "All Teams"
             return candidate, candidate
 
         # Case 4: No team mentioned → use the user's own teams
@@ -183,9 +291,9 @@ def get_agent_tools(
             names = ", ".join(user_context.team_names) if user_context.team_names else user_context.team_ids_csv
             return user_context.team_ids_csv, names
 
-        # Admin with no direct team assignment — '0' means "all" in the SPs
+        # Admin with no direct team assignment → fetch ALL active teams from DB as CSV
         if user_context.is_admin:
-            return "0", "All Teams"
+            return "", "All Teams"
 
         return "", ""
 
@@ -230,7 +338,14 @@ def get_agent_tools(
         await progress.emit("Fetching data from the database...")
 
         try:
-            columns, all_rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
+            # Sp_PharmaCRM_SVT uses ##TerritoryIds (global temp table) — must serialize.
+            # Other SPs are fine with concurrency.
+            if sp_name == "Sp_PharmaCRM_SVT":
+                async with _svt_semaphore:
+                    logger.debug("svt_semaphore_acquired", sp=sp_name)
+                    columns, all_rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
+            else:
+                columns, all_rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
         except Exception as e:
             logger.error("sp_sync_error", sp=sp_name, error=str(e))
             return f"Error executing {report_name}: {str(e)}"
@@ -259,18 +374,31 @@ def get_agent_tools(
         numeric_mins = {columns[i]: float('inf') for i in numeric_indices}
         numeric_maxs = {columns[i]: float('-inf') for i in numeric_indices}
 
-        # Per-group aggregates
-        GROUP_TOP_N = 15
-        priority_keywords = ["customer", "product", "employee", "territory", "region", "team", "brick"]
+        # Per-group aggregates — NO cap: render ALL groups so the LLM sees complete data.
+        # SVT returns 12 month-rows; customer SP may return hundreds of customer groups.
+        # A 200-group warning is emitted but data is never truncated.
+        priority_keywords = ["month", "date", "period", "year", "customer", "product", "employee", "territory", "region", "team", "brick"]
         selected_groups = []
+        found_keywords = set()
+        
         for kw in priority_keywords:
             for i in categorical_indices:
-                if kw in columns[i].lower() and i not in selected_groups:
+                col_lower = columns[i].lower()
+                if kw in col_lower and kw not in found_keywords:
+                    # Prefer name columns over ID columns
+                    if "id" in col_lower or "code" in col_lower:
+                        # See if there's a non-ID version
+                        has_name_version = any(kw in columns[j].lower() and "id" not in columns[j].lower() for j in categorical_indices)
+                        if has_name_version:
+                            continue # Skip the ID column
+                    
                     selected_groups.append(i)
-                    if len(selected_groups) >= 2:
+                    found_keywords.add(kw)
+                    if len(selected_groups) >= 3:
                         break
-            if len(selected_groups) >= 2:
+            if len(selected_groups) >= 3:
                 break
+        
         if not selected_groups:
             selected_groups = categorical_indices[:2]
 
@@ -301,11 +429,11 @@ def get_agent_tools(
                     if v is not None:
                         group_sums[gi][gval][columns[ni]] += float(v)
 
-        # Cache for export
-        _last_report_params.update({
+        # Cache for export — scoped to this user so concurrent users don't interfere
+        _last_report_params[security_context.user_id] = {
             "sp_name": sp_name, "report_name": report_name,
             "args": args, "columns": columns, "total": total
-        })
+        }
 
         # Build clean summary for LLM — aggregates only, no raw data
         summary_parts = [
@@ -322,48 +450,94 @@ def get_agent_tools(
                     f"Avg={numeric_sums[col]/total:,.4f}"
                 )
 
-        # Per-group breakdowns (revenue-first)
+        # Per-group breakdowns
+        TIME_SERIES_KEYWORDS = ["month", "date", "period", "year"]
+        MONTH_ORDER = {
+            "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+            "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+        }
+
+        def _chrono_key(item):
+            """Sort key for MonthYear values like 'Jul 24', 'Jan 2025', '2025/07'."""
+            gv = str(item[0]).strip()
+            parts = gv.split()
+            if len(parts) == 2:  # e.g. "Jul 24" or "Jul 2024"
+                month_num = MONTH_ORDER.get(parts[0][:3].capitalize(), 0)
+                try:
+                    yr = int(parts[1])
+                    year_num = yr if yr > 100 else 2000 + yr
+                except ValueError:
+                    year_num = 0
+                return (year_num, month_num)
+            return (0, 0)
+
         for gi in selected_groups:
             gsums = group_sums[gi]
             gcol = columns[gi]
             if not gsums:
                 continue
 
-            rev_cols = [c for c in numeric_sums if any(kw in c.lower() for kw in ["value", "amount", "revenue", "net", "sale", "price"])]
-            unit_cols = [c for c in numeric_sums if any(kw in c.lower() for kw in ["unit", "qty", "quantity", "box", "pack"])]
+            is_time_series = any(kw in gcol.lower() for kw in TIME_SERIES_KEYWORDS)
 
-            for gval, gnums in gsums.items():
-                total_rev_col = next((c for c in rev_cols if any(kw in c.lower() for kw in ["total", "ytd", "overall"])), None)
-                total_unit_col = next((c for c in unit_cols if any(kw in c.lower() for kw in ["total", "ytd", "overall"])), None)
-                
-                if total_rev_col:
-                    gnums["_Period_Total_Revenue"] = gnums[total_rev_col]
+            if is_time_series:
+                # --- Time-series: chronological markdown table ---
+                # Show all numeric columns directly (no misleading cross-year sums).
+                num_cols_to_show = [c for c in columns if c in numeric_sums]
+                chrono_sorted = sorted(gsums.items(), key=_chrono_key)
+
+                summary_parts.append(
+                    f"\n### {gcol} Breakdown — {len(gsums)} months (chronological)"
+                )
+                header = "| " + gcol + " | " + " | ".join(num_cols_to_show) + " |"
+                divider = "|" + "|".join(["---"] * (1 + len(num_cols_to_show))) + "|"
+                summary_parts.append(header)
+                summary_parts.append(divider)
+                for gv, gnums_row in chrono_sorted:
+                    row_vals = [f"{gnums_row.get(c, 0):,.2f}" for c in num_cols_to_show]
+                    summary_parts.append("| " + str(gv) + " | " + " | ".join(row_vals) + " |")
+
+            else:
+                # --- Non-time-series: ranked list (customers, products, etc.) ---
+                rev_cols = [c for c in numeric_sums if any(kw in c.lower() for kw in ["value", "amount", "revenue", "net", "sale", "price"])]
+                unit_cols = [c for c in numeric_sums if any(kw in c.lower() for kw in ["unit", "qty", "quantity", "box", "pack"])]
+
+                for gval, gnums in gsums.items():
+                    total_rev_col = next((c for c in rev_cols if any(kw in c.lower() for kw in ["total", "ytd", "overall"])), None)
+                    total_unit_col = next((c for c in unit_cols if any(kw in c.lower() for kw in ["total", "ytd", "overall"])), None)
+                    gnums["_Period_Total_Revenue"] = gnums[total_rev_col] if total_rev_col else sum(gnums.get(c, 0) for c in rev_cols[:1])
+                    gnums["_Period_Total_Units"] = gnums[total_unit_col] if total_unit_col else sum(gnums.get(c, 0) for c in unit_cols[:1])
+
+                unique_count = len(gsums)
+                all_sorted = sorted(gsums.items(), key=lambda x: x[1].get("_Period_Total_Revenue", 0), reverse=True)
+
+                HIGH_CARDINALITY_THRESHOLD = 50
+                HIGH_CARDINALITY_CAP = 200
+
+                if unique_count <= HIGH_CARDINALITY_THRESHOLD:
+                    summary_parts.append(f"\n### All {unique_count} **{gcol}** (ranked by revenue, highest first)")
+                    display_sorted = all_sorted
+                    metric_col_limit = None
                 else:
-                    gnums["_Period_Total_Revenue"] = sum(gnums[c] for c in rev_cols)
-                    
-                if total_unit_col:
-                    gnums["_Period_Total_Units"] = gnums[total_unit_col]
-                else:
-                    gnums["_Period_Total_Units"] = sum(gnums[c] for c in unit_cols)
+                    display_sorted = all_sorted[:HIGH_CARDINALITY_CAP]
+                    summary_parts.append(
+                        f"\n### Top {HIGH_CARDINALITY_CAP} of {unique_count} **{gcol}** by revenue "
+                        f"(overall totals above already include ALL {unique_count}; "
+                        f"say 'export CSV' for the complete {unique_count}-row breakdown)"
+                    )
+                    metric_col_limit = 6
 
-            unique_count = len(gsums)
-            top_groups = sorted(gsums.items(), key=lambda x: x[1].get("_Period_Total_Revenue", 0), reverse=True)[:GROUP_TOP_N]
-            
-            summary_parts.append(f"\n### Top {len(top_groups)} of {unique_count} unique **{gcol}** (ranked by Overall Period Revenue)")
-            for rank, (gval, gnums) in enumerate(top_groups, 1):
-                count = group_counts[gi][gval]
-                
-                rev_val = gnums.get("_Period_Total_Revenue", 0)
-                unit_val = gnums.get("_Period_Total_Units", 0)
-                
-                num_line = f"Overall Revenue: {rev_val:,.2f} | Overall Units: {unit_val:,.2f}"
-                
-                # Include all original numeric columns so the LLM has exact month-by-month values
-                orig_cols = [f"{k}={v:,.2f}" for k, v in gnums.items() if not str(k).startswith("_") and isinstance(v, (int, float))]
-                if orig_cols:
-                    num_line += f" | {', '.join(orig_cols)}"
-
-                summary_parts.append(f"{rank}. **{gval}** — Records: {count:,} | {num_line}")
+                for rank, (gval, gnums) in enumerate(display_sorted, 1):
+                    count = group_counts[gi].get(gval, 0)
+                    rev_val = gnums.get("_Period_Total_Revenue", 0)
+                    unit_val = gnums.get("_Period_Total_Units", 0)
+                    num_line = f"Revenue: {rev_val:,.2f} | Units: {unit_val:,.2f}"
+                    orig_cols_all = [(k, v) for k, v in gnums.items() if not str(k).startswith("_") and isinstance(v, (int, float))]
+                    orig_cols_all.sort(key=lambda x: abs(x[1]), reverse=True)
+                    orig_cols_slice = orig_cols_all if metric_col_limit is None else orig_cols_all[:metric_col_limit]
+                    orig_cols = [f"{k}={v:,.2f}" for k, v in orig_cols_slice]
+                    if orig_cols:
+                        num_line += f" | {', '.join(orig_cols)}"
+                    summary_parts.append(f"{rank}. **{gval}** — Records: {count:,} | {num_line}")
 
         if total > 500:
             first_group = selected_groups[0] if selected_groups else None
@@ -390,12 +564,12 @@ def get_agent_tools(
         if total == 0:
             return f"The {report_name} returned no data."
 
-        # Automatically export to CSV if the result set is large (e.g., > 1,500 rows)
+        # Automatically export to CSV if the result set is large (> 1,500 rows)
         export_md = ""
         if total > 1500:
             try:
-                # Target the .NET Server's wwwroot directory so it serves the file automatically
-                export_dir = r"d:\Office Stuff\AtcoGenie\AtcoGenie.Server\wwwroot\exports"
+                from app.config import get_settings as _get_settings
+                export_dir = _get_settings().export_dir
                 os.makedirs(export_dir, exist_ok=True)
                 
                 safe_name = report_name.replace(' ', '_').replace('/', '')
@@ -542,12 +716,41 @@ def get_agent_tools(
             return "Invalid date range. The Customer Sales Report supports a maximum of 2 years."
 
         team_ids, resolved_team_name = await _resolve_team_ids(team_name)
-        if not team_ids:
+        if not team_ids and not user_context.is_admin:
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
 
-        # Prefix so the LLM knows the exact team name that was resolved
-        team_context_note = f"[Resolved team: **{resolved_team_name}** (ID: {team_ids})]\n\n"
+        # SS_sp_CustomerSales_YTD_Excel does NOT support '' for all-teams (unlike SVT).
+        # If admin got the empty-string sentinel, fetch the real CSV of all active team IDs.
+        if not team_ids and user_context.is_admin:
+            team_ids, resolved_team_name = await _fetch_all_team_ids_csv()
+            logger.info("customer_sales_admin_team_csv_override",
+                        team_count=len(team_ids.split(",")) if team_ids else 0)
+
+        # ── SCOPE GATE ────────────────────────────────────────────────────────
+        # SS_sp_CustomerSales_YTD_Excel pivots every customer×product row per month.
+        # All-teams + multi-month = 2M+ rows that hit the 120-second cursor timeout.
+        # Safe envelope: < 5 teams OR ≤ 3 months.
+        team_count   = len(team_ids.split(",")) if team_ids else 0
+        date_span_months = (to_year - from_year) * 12 + (to_month - from_month + 1)
+        if team_count > 5 and date_span_months > 3:
+            period_label = f"{from_year}/{from_month:02d} – {to_year}/{to_month:02d}"
+            logger.warning(
+                "customer_sales_scope_limit",
+                team_count=team_count, months=date_span_months, period=period_label
+            )
+            return (
+                f"⚠️ **Scope too large for Customer Sales SP** ({team_count} teams × {date_span_months} months) — "
+                f"this would return 2M+ rows and will time out.\n\n"
+                f"To get what you need, choose one of these options:\n"
+                f"- **Specific team**: “which products in Team Jaguar had highest revenue {from_year}?” — fast, full detail\n"
+                f"- **Shorter window**: ask for 1–3 months at a time for all teams — fast, full detail\n"
+                f"- **Monthly revenue summary** (no per-product breakdown): I can pull this via the "
+                f"aggregated sales report instantly for the full period ({period_label})."
+            )
+
+
+        team_context_note = f"[Context: **All Teams**]\n\n" if resolved_team_name == "All Teams" else f"[Context: Team **{resolved_team_name}**]\n\n"
 
         # If product names provided, resolve them to best-matched single IDs and run comparison
         if product_names:
@@ -561,43 +764,23 @@ def get_agent_tools(
 
             period = f"{from_year}/{from_month:02d}–{to_year}/{to_month:02d}"
 
-            # Point 4: fetch all product SPs in PARALLEL instead of sequentially
+            # Point 4: fetch all product SPs in PARALLEL using the fast sync path
             async def _fetch_one_product(search_name: str, pid: str, matched_name: str) -> str:
-                """Runs a single product SP and returns a formatted markdown section."""
+                """Runs a single product SP via the fast sync path and returns a formatted section."""
                 try:
                     logger.info("product_comparison_sp", product=matched_name, pid=pid, team=team_ids)
-                    results = await db_manager.execute_sp(
-                        "pharma", sp_name,
+                    args = (
                         "1", from_year, from_month, to_year, to_month,
                         distributor_type or "0", "0", "0", "0",
                         team_ids, pid,
                         user_context.user_role, security_context.employee_id
                     )
-                    if not results:
-                        return (
-                            f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})"
-                            f"\n- ⚠️ No sales data found for this product in team {team_ids} during {period}."
-                        )
-
-                    cust_key = next((k for k in results[0] if k.lower() == "customer"), None)
-                    customers = list({r.get(cust_key, "") for r in results if r.get(cust_key)}) if cust_key else []
-
-                    import decimal
-                    numeric_totals = {}
-                    for col in results[0]:
-                        vals = [r[col] for r in results if isinstance(r.get(col), (int, float, decimal.Decimal))]
-                        if vals:
-                            numeric_totals[col] = sum(float(v) for v in vals)
-
-                    lines = [f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})"]
-                    lines.append(f"- **Records:** {len(results):,}")
-                    lines.append(f"- **Unique customers:** {len(customers):,}")
-                    for col, total in list(numeric_totals.items())[:8]:
-                        lines.append(f"- **{col} Total:** {total:,.2f}")
-                    if customers:
-                        lines.append(f"- **Top customers (sample):** {', '.join(customers[:10])}")
-                    lines.append(f"- **Sample rows (3):** {json.dumps(results[:3], default=str)}")
-                    return "\n".join(lines)
+                    section = await _fetch_and_summarize(
+                        sp_name,
+                        f"Customer Sales — {matched_name} (ID: {pid})",
+                        args,
+                    )
+                    return f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})\n{section}"
                 except Exception as e:
                     return f"\n### {search_name}: ⚠️ Error — {str(e)}"
 
@@ -661,33 +844,56 @@ def get_agent_tools(
             return denied
 
         team_ids, resolved_team_name = await _resolve_team_ids(team_name)
-        if not team_ids:
+        if not team_ids and not user_context.is_admin:
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
 
-        team_context_note = f"[Resolved team: **{resolved_team_name}** (ID: {team_ids})]\n\n"
+        team_context_note = f"[Context: **All Teams**]\n\n" if resolved_team_name == "All Teams" else f"[Context: Team **{resolved_team_name}**]\n\n"
+
+        # '' is the native SVT all-teams value; team_ids is already '' for admin all-teams
+        sp_team_param = team_ids
+
+        # --- Enforce full FY boundaries (SP uses exact equality on FiscalYearFromDate/FiscalYearToDate) ---
+        fy_windows = _split_into_fiscal_years(date_from, date_to)
+        if not fy_windows:
+            return "No valid fiscal year data windows found for the given date range."
 
         try:
-            logger.info("executing_sp_stream", sp=sp_name, user=security_context.user_id, team=team_ids)
-            args = (
-                "",                  # @Param_GroupId
-                team_ids,            # @Param_TeamId
-                product_id,          # @Param_ProductId
-                territory_id,        # @Param_TerritoryId
-                "",                  # @Param_RegionId
-                "",                  # @Param_DistrictId
-                sales_channel,       # @Param_SalesChannel
-                1,                   # @Param_IsActualPrice
-                date_from,           # @Param_InvoiceDate_From
-                date_to,             # @Param_InvoiceDate_To
-                1                    # @Param_MonthID
+            logger.info("executing_sp_stream", sp=sp_name, user=security_context.user_id, team=sp_team_param)
+
+            async def _svt_fetch_fy(fy_label: str, fy_start: str, fy_end: str, range_note: str) -> str:
+                args = (
+                    "",               # @Param_GroupId
+                    sp_team_param,    # @Param_TeamId
+                    product_id,       # @Param_ProductId
+                    territory_id,     # @Param_TerritoryId
+                    "",               # @Param_RegionId
+                    "",               # @Param_DistrictId
+                    sales_channel,    # @Param_SalesChannel
+                    1,                # @Param_IsActualPrice
+                    fy_start,         # @Param_InvoiceDate_From  (ALWAYS full FY boundary)
+                    fy_end,           # @Param_InvoiceDate_To    (ALWAYS full FY boundary)
+                    1,                # @Param_MonthID
+                )
+                result = await _fetch_and_summarize(sp_name, f"Sales vs Target ({fy_label})", args)
+                return f"## {fy_label} ({fy_start} → {fy_end})\n*{range_note}*\n\n{result}"
+
+            # Sp_PharmaCRM_SVT uses a global temp table (##TerritoryIds).
+            # Parallel calls cause SQL 2714 "object already exists" — run sequentially.
+            fy_results = []
+            for label, fy_start, fy_end, range_note in fy_windows:
+                fy_results.append(await _svt_fetch_fy(label, fy_start, fy_end, range_note))
+
+            header = (
+                f"# Sales vs Target Report\n"
+                f"**Period:** {date_from} → {date_to} | **Fiscal Years Queried:** {len(fy_windows)}\n\n"
             )
-            result = await _fetch_and_summarize(sp_name, "Sales vs Target Report", args)
-            return team_context_note + result
+            return team_context_note + header + "\n\n".join(fy_results)
 
         except Exception as e:
             logger.error("sp_execution_error", sp=sp_name, error=str(e))
             return f"Error executing Sales vs Target Report: {str(e)}"
+
 
     # -----------------------------------------------------------------
     # Tool 3: Incentive Summary (Sp_PharmaCRM_GetIncentiveProcessReport)
@@ -708,11 +914,11 @@ def get_agent_tools(
             return denied
 
         team_ids, resolved_team_name = await _resolve_team_ids(team_name)
-        if not team_ids:
+        if not team_ids and not user_context.is_admin:
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
 
-        team_context_note = f"[Resolved team: **{resolved_team_name}** (ID: {team_ids})]\n\n"
+        team_context_note = f"[Context: **All Teams**]\n\n" if resolved_team_name == "All Teams" else f"[Context: Team **{resolved_team_name}**]\n\n"
 
         try:
             logger.info("executing_sp_stream", sp=sp_name, user=security_context.user_id, team=team_ids)
@@ -733,20 +939,168 @@ def get_agent_tools(
             return f"Error executing Incentive Summary Report: {str(e)}"
 
     # -----------------------------------------------------------------
+    # Tool: Aggregated Sales Report (Sp_PharmaCRM_SVT — pre-aggregated monthly tables)
+    #
+    # Use when: broad date range, no customer-level detail needed, multi-FY analysis,
+    # negative revenue detection, or when customer_sales_report would time out.
+    # Data available from: July 2024 onwards.
+    # Authorization: enforced by TeamID per call (same as SVT).
+    # Multi-year: automatically splits into per-FY calls and runs them in parallel.
+    # -----------------------------------------------------------------
+    async def run_aggregated_sales(
+        date_from: str,
+        date_to: str,
+        team_name: Optional[str] = None,
+        product_id: str = "",
+        territory_id: str = "",
+        sales_channel: str = "1",
+    ) -> str:
+        """Retrieves aggregated monthly sales data across one or more fiscal years.
+        Automatically runs parallel SP calls per fiscal year and merges results."""
+
+        sp_name = "Sp_PharmaCRM_SVT"
+
+        denied = _check_access(sp_name, "Aggregated Sales Report")
+        if denied:
+            return denied
+
+        # --- Date validation ---
+        MIN_DATE_STR = "2024/07/01"
+        MIN_DATE = datetime(2024, 7, 1)
+        try:
+            from_dt = datetime.strptime(date_from, "%Y/%m/%d")
+            to_dt = datetime.strptime(date_to, "%Y/%m/%d")
+        except ValueError:
+            return (
+                "Invalid date format. Please use YYYY/MM/DD format (e.g. '2024/07/01'). "
+                f"Received: from='{date_from}', to='{date_to}'."
+            )
+
+        if from_dt > to_dt:
+            return "Invalid date range: start date must be before end date."
+
+        if to_dt < MIN_DATE:
+            return (
+                "⚠️ The Aggregated Sales Report only contains data from **July 2024 onwards**. "
+                f"Your requested range ({date_from} → {date_to}) is entirely before this. "
+                "For older historical data, please use the `customer_sales_report` tool."
+            )
+
+        early_warning = ""
+        if from_dt < MIN_DATE:
+            date_from = MIN_DATE_STR
+            early_warning = "⚠️ *Aggregated data is only available from July 2024. Results are shown from 2024/07/01.*\n\n"
+
+        # --- Team resolution (enforces authorization) ---
+        team_ids, resolved_team_name = await _resolve_team_ids(team_name)
+        if not team_ids and not user_context.is_admin:
+            available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
+            return (
+                f"I could not resolve your team. Your available teams are: {available}. "
+                "Please specify which team you'd like to see."
+            )
+
+        team_context_note = (
+            "[Context: **All Teams**]\n\n" if resolved_team_name == "All Teams"
+            else f"[Context: Team **{resolved_team_name}**]\n\n"
+        )
+
+        # --- Split requested range into fiscal year windows ---
+        fy_windows = _split_into_fiscal_years(date_from, date_to)
+        if not fy_windows:
+            return "No valid fiscal year data windows found for the given date range."
+
+        # Sp_PharmaCRM_SVT expects an empty string '' for all-teams when no filter.
+        # Since we now pass an actual CSV of team IDs, we can pass it directly.
+        # Keep the empty-string fallback only if team_ids somehow ended up blank.
+        sp_team_param = team_ids if team_ids else ""
+
+        logger.info(
+            "aggregated_sales_start",
+            sp=sp_name, user=security_context.user_id,
+            team=sp_team_param, fy_count=len(fy_windows),
+        )
+        await progress.emit(
+            f"Running aggregated sales query across {len(fy_windows)} "
+            f"fiscal year(s) in parallel..."
+        )
+
+        # --- One SP call per fiscal year, all fired in parallel ---
+        async def _fetch_one_fy(fy_label: str, fy_start: str, fy_end: str, range_note: str) -> str:
+            args = (
+                "",               # @Param_GroupId
+                sp_team_param,    # @Param_TeamId  ← authorization boundary
+                product_id,       # @Param_ProductId
+                territory_id,     # @Param_TerritoryId
+                "",               # @Param_RegionId
+                "",               # @Param_DistrictId
+                sales_channel,    # @Param_SalesChannel
+                1,                # @Param_IsActualPrice
+                fy_start,         # @Param_InvoiceDate_From  (ALWAYS full FY boundary)
+                fy_end,           # @Param_InvoiceDate_To    (ALWAYS full FY boundary)
+                1,                # @Param_MonthID
+            )
+            logger.info(
+                "aggregated_sales_fy_call",
+                fy=fy_label, from_=fy_start, to_=fy_end, team=sp_team_param,
+            )
+            result = await _fetch_and_summarize(
+                sp_name, f"Aggregated Sales ({fy_label})", args
+            )
+            # Tell the AI explicitly: use the MonthYear table row-by-row
+            render_hint = (
+                "\n> ⚡ **RENDER INSTRUCTION**: The MonthYear Breakdown table below contains "
+                f"individual month rows covering **{range_note}**. "
+                "Extract only the months that fall within the user's requested calendar range and "
+                "render each one as a separate row. Do NOT aggregate into H1/H2."
+            )
+            return f"## {fy_label} ({fy_start} \u2192 {fy_end})\n*{range_note}*{render_hint}\n\n{result}"
+
+        # Sp_PharmaCRM_SVT uses a global temp table (##TerritoryIds) internally.
+        # Running two FY calls in PARALLEL causes SQL error 2714:
+        #   "There is already an object named '##TerritoryIds' in the database"
+        # because both connections try to CREATE ##TerritoryIds at the same time.
+        # Solution: run FY calls SEQUENTIALLY.
+        fy_results = []
+        for label, fy_start, fy_end, range_note in fy_windows:
+            fy_results.append(await _fetch_one_fy(label, fy_start, fy_end, range_note))
+
+        # --- Merge all fiscal year sections into a single response ---
+        parts = [
+            early_warning + team_context_note,
+            "# Aggregated Sales Report",
+            f"**Period:** {date_from} → {date_to} | **Fiscal Years Queried:** {len(fy_windows)}",
+            "",
+        ]
+        parts.extend(fy_results)
+
+        if len(fy_windows) > 1:
+            parts.append(
+                "\n> 📊 **Multi-Year Query**: Results are broken down by fiscal year (Jul\u2013Jun). "
+                "Each section's MonthYear Breakdown table shows individual months. "
+                "Combine the relevant months from each FY section into ONE chronological "
+                "month-by-month table in your response — do NOT summarise into H1/H2."
+            )
+
+        return "\n".join(parts)
+
+    # -----------------------------------------------------------------
     # Tool 4: On-Demand CSV Export (only triggered when user asks)
     # -----------------------------------------------------------------
     async def run_export_csv(report_name: str) -> str:
         """Exports the last fetched report to a downloadable CSV file.
         Only call this when the user explicitly asks to download, export, or get a CSV."""
-        if not _last_report_params.get("sp_name"):
+        user_cache = _last_report_params.get(security_context.user_id, {})
+        if not user_cache.get("sp_name"):
             return "No report has been fetched in this session yet. Please run a report first, then ask to download it."
 
-        sp_name = _last_report_params["sp_name"]
-        cached_report_name = _last_report_params.get("report_name", report_name)
-        args = _last_report_params["args"]
-        total = _last_report_params.get("total", 0)
+        sp_name = user_cache["sp_name"]
+        cached_report_name = user_cache.get("report_name", report_name)
+        args = user_cache["args"]
+        total = user_cache.get("total", 0)
 
-        export_dir = r"d:\Office Stuff\AtcoGenie\AtcoGenie.Server\wwwroot\exports"
+        from app.config import get_settings as _get_settings
+        export_dir = _get_settings().export_dir
         os.makedirs(export_dir, exist_ok=True)
         safe_name = cached_report_name.replace(' ', '_').replace('/', '')
         filename = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.csv"
@@ -777,58 +1131,123 @@ def get_agent_tools(
 
     async def run_query_user_dataset(upload_id: str, query: str) -> str:
         """
-        Executes a DuckDB query against a user-uploaded Parquet file.
-        Ensures the user owns the file before executing.
+        Execute a DuckDB SQL query against a user-uploaded Parquet file.
+
+        Security:
+        - Verifies ownership (user_id match) in Postgres
+        - Verifies status=='ready' — no reads during conversion
+        - Path is passed explicitly into the thread (not via closure) to prevent
+          stale-reference issues in concurrent scenarios
+
+        The table is exposed as a view named 'data':
+            SELECT * FROM data
+            SELECT * FROM data WHERE _sheet = 'Sales Q1'
+            SELECT _sheet, COUNT(*) FROM data GROUP BY _sheet
         """
-        # Note: the actual parquet path could be derived or queried from the DB.
-        # But we will query the DB to get the path securely.
         pool = db_manager.get_pool("postgres")
         if not pool:
-            return "Error: Database uninitialized."
-            
+            return "Error: Database not available."
+
+        # ── Step 1: Fetch row + verify ownership + check status ──────────────
         try:
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT parquet_path, user_id FROM document_uploads WHERE id = $1", 
-                    uuid.UUID(upload_id)
+                    """
+                    SELECT parquet_path, user_id, status, filename, sheet_names, error_message
+                    FROM document_uploads
+                    WHERE id = $1
+                    """,
+                    uuid.UUID(upload_id),
                 )
-                if not row:
-                    return "Error: Dataset not found or expired."
-                
-                # RBAC Validation
-                if row["user_id"] != security_context.user_id:
-                    logger.warning("unauthorized_dataset_access", user=security_context.user_id, upload_id=upload_id)
-                    return "Error: You are not authorized to access this dataset."
-                
-                parquet_path = row["parquet_path"]
-                
-                # We need to replace the placeholder table name in the query with the actual read_parquet statement
-                # Or just inject read_parquet. We'll specify in the description to use '{parquet_path}' or we 
-                # can dynamically intercept it. Better: ask AI to use 'data' as table name, and we create a view.
         except Exception as e:
             logger.error("dataset_query_db_failed", error=str(e))
-            return f"Database error: {str(e)}"
-            
+            return f"Database error while looking up dataset: {str(e)}"
+
+        if not row:
+            return "Error: Dataset not found. It may have been deleted or the ID is incorrect."
+
+        if row["user_id"].lower() != security_context.user_id.lower():
+            logger.warning(
+                "unauthorized_dataset_access",
+                user=security_context.user_id,
+                upload_id=upload_id,
+            )
+            return "Error: You are not authorized to access this dataset."
+
+        if row["status"] == "processing":
+            return (
+                f"Dataset '{row['filename']}' is still being processed. "
+                "Please wait a moment, then try again."
+            )
+        if row["status"] == "error":
+            return (
+                f"Dataset '{row['filename']}' failed to convert: "
+                f"{row['error_message'] or 'Unknown error.'}"
+            )
+        if row["status"] != "ready":
+            return f"Dataset is in an unexpected state: {row['status']}."
+
+        parquet_path: str = row["parquet_path"]
+        filename: str = row["filename"]
+
         try:
-            await progress.emit("Analyzing uploaded dataset...")
-            
-            def _duck_execute():
-                # Connect in-memory and register the parquet wrapper as a view named 'data'
-                con = duckdb.connect(database=':memory:')
-                con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{parquet_path}')")
-                
-                # Run the AI's query
-                logger.info("duckdb_execute", query=query)
-                res = con.execute(query).fetchdf()
-                return res.to_markdown()
-                
-            import asyncio
-            result_md = await asyncio.to_thread(_duck_execute)
+            import json as _json
+            sheet_names = _json.loads(row["sheet_names"]) if isinstance(row["sheet_names"], str) else (row["sheet_names"] or [])
+        except Exception:
+            sheet_names = []
+
+        # ── Step 2: Validate the Parquet file still exists on disk ───────────
+        if not os.path.exists(parquet_path):
+            return (
+                f"Error: The dataset file for '{filename}' is missing from disk. "
+                "It may have been cleaned up. Please re-upload the file."
+            )
+
+        # ── Step 3: Run DuckDB in a thread — no event loop blocking ──────────
+        ROW_CAP = 200
+
+        def _duck_execute(path: str, sql: str) -> str:
+            # Use posix-style forward slashes — DuckDB on Windows requires it
+            safe_path = path.replace("\\", "/")
+            con = duckdb.connect(database=":memory:")
+            try:
+                con.execute(f"CREATE VIEW data AS SELECT * FROM read_parquet('{safe_path}')")
+                df = con.execute(sql).fetchdf()
+            finally:
+                con.close()
+
+            truncated = len(df) > ROW_CAP
+            df = df.head(ROW_CAP)
+            result_md = df.to_markdown(index=False)
+            if truncated:
+                result_md += (
+                    f"\n\n> ⚠️ Results capped at {ROW_CAP} rows. "
+                    "Refine your query with a WHERE clause or LIMIT to see specific rows."
+                )
             return result_md
-            
+
+        try:
+            await progress.emit(f"Querying dataset '{filename}'...")
+            logger.info("duckdb_execute", upload_id=upload_id, query=query[:200])
+            result_md = await asyncio.to_thread(_duck_execute, parquet_path, query)
+
+            # Prepend sheet context if multi-sheet file
+            header = f"**File:** {filename}"
+            if len(sheet_names) > 1:
+                header += f"\n**Sheets available:** {', '.join(f'`{s}`' for s in sheet_names)} — filter with `WHERE _sheet = '<name>'`"
+            return f"{header}\n\n{result_md}"
+
         except Exception as e:
-            logger.error("duckdb_query_failed", query=query, error=str(e))
-            return f"Query failed: {str(e)}"
+            err = str(e)
+            logger.error("duckdb_query_failed", upload_id=upload_id, query=query[:200], error=err)
+            # Give the AI a helpful hint for common SQL mistakes
+            if "does not exist" in err.lower() or "no such" in err.lower():
+                return (
+                    f"Query error: {err}\n\n"
+                    "**Hint:** The table is always named `data`. "
+                    f"Available columns: {', '.join(['`_sheet`'] if sheet_names else [])}"
+                )
+            return f"Query failed: {err}"
 
     # -----------------------------------------------------------------
     # Build Tool List
@@ -850,23 +1269,33 @@ def get_agent_tools(
             coroutine=run_customer_sales,
             name="customer_sales_report",
             description=(
-                "Use this tool when the user asks about customer sales, distributor-wise data, "
-                "brick-wise sales, product sales by customer, or which customers are not buying products. "
-                "Requires a date range (year/month). Maximum 2 years range. "
-                "If product names are given, pass them in 'product_names' list — do NOT ask user for product IDs."
+                "Detailed product-level and customer-level sales data (per-customer, per-product rows). "
+                "Use when the user asks: which specific customers bought X, distributor-wise sales, "
+                "brick-wise breakdown, or a per-product table for a SPECIFIC TEAM or SHORT DATE RANGE. "
+                "If product names are mentioned, pass them in 'product_names'. "
+                "⚠️ SCOPE LIMIT — this SP returns one row per customer×product and will TIME OUT "
+                "when all teams are queried for more than 3 months. "
+                "For product RANKINGS across all teams or for periods longer than 3 months, "
+                "use 'aggregated_sales_report' instead (it handles wide scopes without timing out). "
+                "Max supported range: 2 years, but wide-scope queries must be scoped to 1 team or ≤3 months."
             ),
             args_schema=CustomerSalesInput,
         ),
         StructuredTool.from_function(
             func=None,
-            coroutine=run_sales_vs_target,
-            name="sales_vs_target_report",
+            coroutine=run_aggregated_sales,
+            name="aggregated_sales_report",
             description=(
-                "Use this tool when the user asks about sales vs target, territory-wise performance, "
-                "target achievement, or comparing current sales with previous period. "
-                "Requires a date range in YYYY/MM/DD format."
+                "Aggregated monthly sales totals and sales-vs-target data. "
+                "Use for: month-over-month trends, year-over-year comparison, target achievement %, "
+                "fiscal year revenue totals, wide date ranges (multi-month or multi-year), "
+                "and ANY query covering more than 3 months OR more than 5 teams simultaneously. "
+                "This tool is the ONLY one that handles all-teams + full-year queries without timing out. "
+                "It provides monthly aggregated totals by territory; it does NOT break data down "
+                "by individual customer row, but it does give overall revenue trends efficiently. "
+                "Data available from July 2024 onwards. Multi-year queries run parallel FY calls automatically."
             ),
-            args_schema=SalesVsTargetInput,
+            args_schema=AggregatedSalesInput,
         ),
         StructuredTool.from_function(
             func=None,

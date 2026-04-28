@@ -8,6 +8,7 @@ public class GenieQueryRequest
     public required string Prompt { get; set; }
     public List<string>? PreferredSources { get; set; }
     public int? SessionId { get; set; } // Chat session ID for context
+    public string? Model { get; set; } // Optional model override (e.g. "gemini-2.5-flash", "gemini-2.5-pro")
 }
 
 /// <summary>

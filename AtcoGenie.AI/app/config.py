@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_log_level: str = "DEBUG"
     cors_origins: str = "http://localhost:5173,http://localhost:5256"
+    export_dir: str = r"d:\Office Stuff\AtcoGenie\AtcoGenie.Server\wwwroot\exports"
 
     # --- LLM Provider ---
     llm_provider: str = "openai"
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     openai_fallback_model: str = "gpt-4o"
     google_api_key: str = ""
     google_model: str = "gemini-2.5-flash"
+    anthropic_api_key: str = ""  # Set to enable Claude model selection
 
     # --- Pharma CRM (MS SQL) ---
     pharma_db_host: str = "10.10.0.88"

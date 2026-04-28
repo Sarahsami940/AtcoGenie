@@ -9,6 +9,8 @@ Manages lifecycle of parallel connection pools for:
 """
 
 import asyncio
+import threading
+from contextvars import ContextVar
 from typing import Dict, Any, Optional
 import aioodbc
 import asyncpg
@@ -16,6 +18,19 @@ import pyodbc
 from app.config import Settings
 from app.logging_config import get_logger
 logger = get_logger(__name__)
+
+# Per-request cancellation signal — set this threading.Event to abort the
+# running execute_sp_sync thread without waiting for the full query to finish.
+_cancel_event: ContextVar[threading.Event | None] = ContextVar("db_cancel_event", default=None)
+
+
+def set_cancel_event(evt: threading.Event) -> None:
+    """Bind a cancel event to the current async context (call once per request)."""
+    _cancel_event.set(evt)
+
+
+def get_cancel_event() -> threading.Event | None:
+    return _cancel_event.get()
 
 class DatabaseManager:
     def __init__(self, settings: Settings):
@@ -174,9 +189,16 @@ class DatabaseManager:
             raise ValueError(f"No ODBC DSN configured for pool '{pool_name}'")
 
         def _run():
+            from app.agent.langfuse_context import log_db_query_span, finish_db_query_span
+            
+            cancel_evt = get_cancel_event()  # thread-safe read from ContextVar copy
             conn = pyodbc.connect(dsn, timeout=60, autocommit=True)
+            conn.timeout = 120  # 2-minute command timeout; prevents 8-min TCP hangs on heavy queries
+            span_id = ""
+            error_msg = None
             try:
                 cur = conn.cursor()
+                cur.timeout = 120  # 2-min query execution timeout (cursor-level, more reliable than conn.timeout)
                 # Step 1: suppress intermediate row-count messages
                 cur.execute("SET NOCOUNT ON")
                 # Step 2: execute the SP with inline args (safe — values come from our code, not user input)
@@ -188,21 +210,71 @@ class DatabaseManager:
                         arg_strs.append(str(a))
                 sql = f"EXEC {sp_name} {', '.join(arg_strs)}"
                 logger.info("execute_sp_sync_start", sp=sp_name, sql=sql[:200])
+                
+                # Create Langfuse span
+                span_id = log_db_query_span(sp_name, sql, arg_strs)
+
                 cur.execute(sql)
 
-                if not cur.description:
-                    return [], []
+                # Collect all result sets; use the FIRST non-empty RS.
+                # For Sp_PharmaCRM_SVT:
+                #   RS0 = monthly totals (MonthYear | Units | Amount | PUnits | PAmount)
+                #         12 rows, clear month-year labels e.g. "Sep 25" — best for revenue queries.
+                #   RS1 = prior-period totals
+                #   RS2 = cumulative totals
+                #   RS3 = product-by-month pivot (Product | Jan | ... | Dec)
+                #         Columns have NO year context; AI cannot distinguish Jan 2025 from Jan 2026.
+                # NOTE: Customer Sales SP RS0 also contains the analytically relevant data.
+                # We intentionally do NOT prefer product RS here — use first non-empty.
+                fallback_columns: list[str] = []
+                fallback_rows: list = []
 
-                columns = [c[0] for c in cur.description]
-                all_rows = []
+                rs_index = 0
                 while True:
-                    batch = cur.fetchmany(batch_size)
-                    if not batch:
+                    if cancel_evt and cancel_evt.is_set():
+                        logger.info("execute_sp_sync_cancelled", sp=sp_name, rows_so_far=len(fallback_rows))
+                        try:
+                            cur.cancel()
+                        except Exception:
+                            pass
+                        raise asyncio.CancelledError("DB query cancelled by client disconnect")
+
+                    if cur.description:
+                        rs_cols = [c[0] for c in cur.description]
+                        rs_rows = []
+                        while True:
+                            batch = cur.fetchmany(batch_size)
+                            if not batch:
+                                break
+                            rs_rows.extend(batch)
+
+                        # Keep the first non-empty RS
+                        if not fallback_rows and rs_rows:
+                            fallback_columns = rs_cols
+                            fallback_rows = rs_rows
+                            logger.debug("execute_sp_sync_selected_rs", rs=rs_index,
+                                         cols=rs_cols, rows=len(rs_rows))
+
+                    rs_index += 1
+                    if not cur.nextset():
                         break
-                    all_rows.extend(batch)
+
+                columns = fallback_columns
+                all_rows = fallback_rows
+
                 logger.info("execute_sp_sync_done", sp=sp_name,
-                            rows=len(all_rows), cols=len(columns))
+                            rows=len(all_rows), cols=len(columns),
+                            selected_rs="rs0" if all_rows else "empty")
+
+                if span_id:
+                    finish_db_query_span(span_id, output_data={"rows_returned": len(all_rows), "columns": len(columns)})
+
                 return columns, all_rows
+            except Exception as e:
+                error_msg = str(e)
+                if span_id:
+                    finish_db_query_span(span_id, error=error_msg)
+                raise
             finally:
                 conn.close()
 

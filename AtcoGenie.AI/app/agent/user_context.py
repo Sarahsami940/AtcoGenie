@@ -102,7 +102,7 @@ async def resolve_user_context(
     Flow:
     1. Check Redis cache for previously resolved context
     2. If miss, call Sp_GetEmployeeWiseTeam and SP_GetRole
-    3. Cache the result and return
+    3. Cache the result ONLY if both calls succeeded (no partial/failed caching)
     """
     emp_id = security_context.employee_id
     cache_key = f"{CACHE_PREFIX}:{emp_id}"
@@ -120,6 +120,7 @@ async def resolve_user_context(
 
     # 2. Resolve from Database
     logger.info("user_context_resolving", employee_id=emp_id)
+    resolution_errors = 0  # Track failures — never cache a partial/failed resolution
 
     # 2a. Get Teams
     teams: List[UserTeam] = []
@@ -133,6 +134,7 @@ async def resolve_user_context(
         logger.info("user_teams_resolved", employee_id=emp_id, team_count=len(teams))
     except Exception as e:
         logger.error("user_teams_resolve_error", employee_id=emp_id, error=str(e))
+        resolution_errors += 1
 
     # 2b. Get Role
     user_role = "Normal"
@@ -160,9 +162,11 @@ async def resolve_user_context(
                 if col in first_row:
                     user_role = str(first_row[col])
                     break
-        logger.info("user_role_resolved", employee_id=emp_id, role=user_role, raw_rows=str(role_rows[:1] if role_rows else []))
+        logger.info("user_role_resolved", employee_id=emp_id, role=user_role,
+                    raw_rows=str(role_rows[:1] if role_rows else []))
     except Exception as e:
         logger.error("user_role_resolve_error", employee_id=emp_id, error=str(e))
+        resolution_errors += 1
 
     # Strict match — roles are system-configured, no ambiguity expected
     is_admin = user_role.strip().lower() == "admin"
@@ -174,12 +178,17 @@ async def resolve_user_context(
         is_admin=is_admin
     )
 
-    # 3. Cache the result
-    if role_cache and role_cache.redis:
+    # 3. Cache ONLY when both DB calls succeeded.
+    # If any call failed (e.g. pharma pool not yet ready at startup),
+    # skip caching so the next request retries with a fresh DB lookup.
+    if resolution_errors == 0 and role_cache and role_cache.redis:
         try:
             await role_cache.redis.setex(cache_key, CACHE_TTL, json.dumps(result.to_cache_dict()))
             logger.info("user_context_cached", employee_id=emp_id)
         except Exception as e:
             logger.warning("user_context_cache_write_error", error=str(e))
+    elif resolution_errors > 0:
+        logger.warning("user_context_not_cached_due_to_errors",
+                       employee_id=emp_id, errors=resolution_errors)
 
     return result

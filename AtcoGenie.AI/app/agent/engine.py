@@ -10,6 +10,7 @@ Tracing: Langfuse 4.x via CallbackHandler (injected per-request).
 
 import os
 from functools import lru_cache
+from typing import Optional
 
 from langchain.agents import create_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -22,6 +23,27 @@ from app.logging_config import get_logger
 from app.agent.tools import get_agent_tools
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Model ID resolution map
+# Maps frontend dropdown IDs (from minified bundle Dl array) → (provider, model_string)
+# Frontend IDs: "gemini-3-pro", "gemini-2.5-flash", "claude-3-sonnet"
+# ---------------------------------------------------------------------------
+# Models that use thinking mode (thinkingConfig instead of thinking_budget=0)
+_THINKING_MODEL_IDS = frozenset({
+    "gemini-3.1-pro-preview",
+})
+
+_MODEL_MAP: dict[str, tuple[str, str]] = {
+    # Primary IDs — must stay in sync with VALID_MODELS in Program.cs and model-selector.js
+    "gemini-3.1-flash-lite-preview": ("google", "gemini-3.1-flash-lite-preview"),  # Fast / lightweight
+    "gemini-3.1-pro-preview":        ("google", "gemini-3.1-pro-preview"),          # Thinking / deep reasoning
+    # Legacy aliases — graceful fallback for stale Redis preferences
+    "gemini-2.5-pro":        ("google", "gemini-3.1-pro-preview"),
+    "gemini-2.5-flash":      ("google", "gemini-3.1-flash-lite-preview"),
+    "gemini-2.5-flash-lite": ("google", "gemini-3.1-flash-lite-preview"),
+    "gemini-3-pro":          ("google", "gemini-3.1-pro-preview"),
+}
 
 
 # -----------------------------------------------------------------------
@@ -135,7 +157,24 @@ Example format:
 4. Do not summarize without numbers.
 5. Provide specific, actionable recommendations based on the data.
 6. NEVER ask the user for a tool name, team ID, or internal system parameter — resolve these yourself.
-7. MEMORY FIRST: Before calling any database or system tool, ALWAYS check the conversation history. If the user asks to repeat or re-format results you have already provided in a previous response, DO NOT call the tool again. Reply instantly using the data already present in your chat history/memory to prevent unwanted latency.
+7. MEMORY FIRST: Before calling any database or system tool, ALWAYS check the conversation history. If the user asks to repeat or re-format results you have already provided in a previous response, DO NOT call the tool again — reply instantly using the data already present in your chat history. EXCEPTION: if the user explicitly asks for MORE DETAIL or a DIFFERENT GRANULARITY (e.g., "show monthly breakdown", "break it down by product"), re-query the tool to get the detailed data.
+8. CALENDAR YEAR vs FISCAL YEAR: When a user says "2025" or "year 2025" without specifying fiscal year, treat it as the **calendar year** Jan 1 → Dec 31 2025. Pass date_from='2025/01/01' and date_to='2025/12/31' to the tool — the backend automatically splits this across fiscal years (FY 2024/2025 and FY 2025/2026) and runs parallel queries. NEVER ask the user to clarify fiscal year vs calendar year.
+9. ADMIN & NO TEAM SPECIFIED: If the user is Admin and does not mention any team, do NOT pass a team_name parameter — leave it empty/None. The backend will automatically fetch all active team IDs. NEVER return an error about team resolution for admin users.
+10. MONTHLY BREAKDOWN — MANDATORY: When tool output contains a "MonthYear Breakdown" table, you MUST render EVERY individual month as its own row in your response table. NEVER aggregate months into H1/H2, quarters, or any other grouping unless the user explicitly asks for it. If the data spans two fiscal years (e.g., FY 2024/2025 and FY 2025/2026), extract only the months that fall within the user's requested calendar range and combine them into a single chronological month-by-month table.
+11. TOOL ROUTING — CUSTOMER SALES vs AGGREGATED SALES (strict thresholds):
+    Use `customer_sales_report` ONLY when BOTH conditions are true:
+      a) Scope is 1 specific team (or at most 5 teams)
+      b) Date range is 3 months or fewer
+    Examples that MUST use `customer_sales_report`:
+      • "top products in Team Jaguar, Jan 2024" (1 team, 1 month)
+      • "which customers bought Ascard in Q1 2024" (1 product + team scope)
+      • "brick-wise sales for Team Alpha, Feb–Apr 2026" (1 team, 3 months)
+    Use `aggregated_sales_report` for everything else, including:
+      • ANY query mentioning "all teams" or no specific team + date range > 3 months
+      • "which products had highest revenue in 2024" (all teams × 12 months) → aggregated_sales_report
+      • "total revenue by month for 2025" (all teams × 12 months) → aggregated_sales_report
+    If `customer_sales_report` returns a ⚠️ Scope too large message, immediately call
+    `aggregated_sales_report` for the same period and explain the limitation to the user.
 """
 
 
@@ -147,8 +186,9 @@ def build_system_prompt(
     admin_note = ""
     if user_context.is_admin:
         admin_note = (
-            "- **Admin Override**: You have admin access and can view ALL teams. "
-            "If the user doesn't specify a team, use team ID '0' (all teams) unless they want a specific one."
+            "- **Admin Override**: You have full access to ALL teams. "
+            "If the user does not specify a team, do NOT pass a team_name — leave it empty. "
+            "The backend will automatically resolve all active teams. Never error on team resolution."
         )
 
     team_names_str = ", ".join(user_context.team_names) if user_context.team_names else "No teams resolved"
@@ -161,20 +201,65 @@ def build_system_prompt(
     )
 
 
-def get_llm():
-    """Initialize the LLM based on configuration."""
+def get_llm(model_override: Optional[str] = None):
+    """Initialize the LLM based on configuration or an explicit model_override.
+
+    model_override accepts frontend dropdown IDs (e.g. 'gemini-3.1-pro-preview')
+    which are resolved via _MODEL_MAP. Falls back to .env settings when None.
+    Thinking mode is automatically enabled for models in _THINKING_MODEL_IDS.
+    """
     settings = get_settings()
-    if settings.llm_provider == "google":
+
+    # Resolve provider and model string from override
+    if model_override and model_override in _MODEL_MAP:
+        provider, model_str = _MODEL_MAP[model_override]
+        logger.info("llm_model_override", frontend_id=model_override, resolved_model=model_str, provider=provider)
+    else:
+        provider = settings.llm_provider
+        model_str = settings.google_model if provider == "google" else settings.openai_model
+        if model_override:
+            logger.warning("llm_model_override_unknown", frontend_id=model_override,
+                           fallback=model_str)
+
+    if provider == "google":
+        is_thinking = model_str in _THINKING_MODEL_IDS
+
+        if is_thinking:
+            # Thinking model: enable thinkingConfig with medium budget.
+            # thinking_budget must NOT be 0 — that disables reasoning entirely.
+            google_model_kwargs = {
+                "thinking_config": {"thinking_budget": 8192},  # medium ≈ 8 k tokens
+            }
+            max_out = 16384   # thinking eats tokens; give room for full output
+            logger.info("llm_thinking_enabled", model=model_str, thinking_budget=8192)
+        else:
+            # Fast model: disable thinking to save ~3-5 s per request
+            google_model_kwargs = {
+                "thinking": {"thinking_budget": 0},
+            }
+            max_out = 4096
+
         return ChatGoogleGenerativeAI(
-            model=settings.google_model,
+            model=model_str,
             google_api_key=settings.google_api_key,
             temperature=1,
             max_retries=2,
-            max_output_tokens=4096,
-            model_kwargs={
-                # Disable thinking budget to save 3-5 s per request
-                "thinking": {"thinking_budget": 0},
-            },
+            max_output_tokens=max_out,
+            model_kwargs=google_model_kwargs,
+        )
+    elif provider == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError:
+            raise ImportError(
+                "langchain_anthropic is required for Claude models. "
+                "Install with: pip install langchain-anthropic"
+            )
+        return ChatAnthropic(
+            model=model_str,
+            api_key=settings.anthropic_api_key,
+            temperature=0,
+            max_tokens=4096,
         )
     else:
         try:
@@ -182,7 +267,7 @@ def get_llm():
         except ImportError:
             raise ImportError("langchain_openai is required when llm_provider is 'openai'. Install with: pip install langchain-openai")
         return ChatOpenAI(
-            model=settings.openai_model,
+            model=model_str,
             api_key=settings.openai_api_key,
             temperature=0,
         )
@@ -204,25 +289,31 @@ def create_agent_executor(
     security_context: SecurityContext,
     db_manager: DatabaseManager,
     user_context: ResolvedUserContext,
+    model_override: Optional[str] = None,
 ):
     """
     Returns a compiled LangGraph agent for the user's context.
-    Agents are cached per (user_id, role, team_ids_csv) to avoid rebuilding
-    on every request — the LLM, tools, and graph compilation are reused.
+    Agents are cached per (user_id, role, team_ids_csv, is_admin, model) to avoid
+    rebuilding on every request. Each unique model gets its own cached agent.
     """
+    # Resolve the effective model key for caching
+    effective_model = _MODEL_MAP.get(model_override or "", (None, None))[1] if model_override else None
+    
     cache_key = (
         security_context.user_id,
         user_context.user_role,
         user_context.team_ids_csv,
         user_context.is_admin,
+        effective_model,  # None = .env default
     )
 
     if cache_key in _agent_cache:
-        logger.debug("agent_cache_hit", user=security_context.user_id)
+        logger.debug("agent_cache_hit", user=security_context.user_id, model=effective_model)
         return _agent_cache[cache_key]
 
-    logger.info("agent_cache_miss_building", user=security_context.user_id, role=user_context.user_role)
-    llm = get_llm()
+    logger.info("agent_cache_miss_building", user=security_context.user_id,
+                role=user_context.user_role, model=effective_model or "(env-default)")
+    llm = get_llm(model_override)
     tools = get_agent_tools(security_context, db_manager, user_context)
     system_prompt = build_system_prompt(security_context, user_context)
 

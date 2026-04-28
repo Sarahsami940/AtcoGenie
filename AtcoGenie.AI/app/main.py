@@ -76,6 +76,10 @@ async def lifespan(app: FastAPI):
             logger.warning("langfuse_auth_failed", hint="Check keys match the Langfuse server project")
     app.state.tracer = tracer
 
+    # 4. Initialize upload metadata table (once at startup, not per-request)
+    from app.api.upload import init_metadata_table
+    await init_metadata_table(db_manager)
+
     logger.info("atcogenie_ai_ready", status="all_services_initialized")
 
     yield  # Application runs here

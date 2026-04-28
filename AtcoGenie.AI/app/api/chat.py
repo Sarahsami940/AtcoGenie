@@ -13,10 +13,11 @@ from typing import Dict, Any, List, AsyncGenerator
 from pydantic import BaseModel
 import asyncio
 import json
+import threading
 
 from app.security.context import SecurityContext
 from app.middleware.auth import get_security_context
-from app.database.manager import DatabaseManager
+from app.database.manager import DatabaseManager, set_cancel_event as db_set_cancel_event
 from app.cache.role_cache import RoleCache
 from app.agent.user_context import resolve_user_context
 from app.agent.engine import create_agent_executor
@@ -31,6 +32,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     message: str
     chat_history: List[Dict[str, str]] = []
+    model: str | None = None  # Optional per-request model override from the frontend dropdown
 
 
 def _get_db_manager(request: Request) -> DatabaseManager:
@@ -45,38 +47,68 @@ def _get_role_cache(request: Request) -> RoleCache:
     return request.app.state.role_cache
 
 
-async def _get_active_datasets(user_id: str, db_manager: DatabaseManager) -> str:
+async def _get_active_datasets(user_id: str, session_id: str, db_manager: DatabaseManager) -> str:
+    """
+    Returns a system-prompt string describing all ready uploads for this user
+    in the given chat session. Files are scoped to the chat they were uploaded in.
+    """
     pool = db_manager.get_pool("postgres")
     if not pool:
         return ""
+    if not session_id:
+        return ""  # No session = homepage, no datasets to show
     try:
+        import json
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, filename, schema_json FROM document_uploads 
-                WHERE user_id = $1 AND expires_at > CURRENT_TIMESTAMP
-                """, user_id
+                SELECT id, filename, schema_json, sheet_names, row_count
+                FROM document_uploads
+                WHERE LOWER(user_id) = LOWER($1)
+                  AND session_id = $2
+                  AND status = 'ready'
+                ORDER BY created_at DESC
+                """,
+                user_id,
+                session_id,
             )
             if not rows:
                 return ""
-            
+
             datasets = []
             for r in rows:
-                schema = r["schema_json"]
-                try: 
-                    import json
-                    schema = json.loads(schema) if isinstance(schema, str) else schema
-                    cols = list(schema.keys())
-                except:
+                try:
+                    schema = json.loads(r["schema_json"]) if isinstance(r["schema_json"], str) else (r["schema_json"] or {})
+                    cols = [c for c in schema.keys() if c != "_sheet"]
+                except Exception:
                     cols = []
-                datasets.append(f"- '{r['filename']}' (ID: {r['id']}). Columns: {cols}")
-            
+
+                try:
+                    sheets = json.loads(r["sheet_names"]) if isinstance(r["sheet_names"], str) else (r["sheet_names"] or [])
+                except Exception:
+                    sheets = []
+
+                sheet_hint = ""
+                if len(sheets) > 1:
+                    sheet_hint = f" Sheets: {', '.join(repr(s) for s in sheets)}. Filter with `WHERE _sheet = '<name>'`."
+
+                datasets.append(
+                    f"- **'{r['filename']}'** (ID: `{r['id']}`, rows: {r['row_count']:,})"
+                    f"\n  Columns: {cols}{sheet_hint}"
+                )
+
             if datasets:
-                return "The user has the following active dataset(s) available for analysis:\n" + "\n".join(datasets) + "\nTo query them, use the `query_user_dataset` tool passing the exact ID and a DuckDB SQL query string."
+                return (
+                    "The user has the following uploaded dataset(s) available for analysis:"
+                    "\n" + "\n".join(datasets)
+                    + "\n\nTo query them, use the `query_user_dataset` tool with the exact ID and a DuckDB SQL string."
+                    + " The table is always named `data` (e.g. `SELECT * FROM data LIMIT 10`)."
+                )
             return ""
     except Exception as e:
         logger.error("fetch_active_datasets_failed", error=str(e))
         return ""
+
 
 
 @router.post("/", response_model=Dict[str, Any])
@@ -117,14 +149,22 @@ async def chat(
 
         # Build messages input for the agent graph
         messages = []
-        dataset_info = await _get_active_datasets(context.user_id, db_manager)
+        # Inject session-scoped dataset context into system prompt
+        chat_session_id = request.headers.get("X-Session-Id", "")
+        dataset_info = await _get_active_datasets(context.user_id, chat_session_id, db_manager)
         if dataset_info:
             messages.append({"role": "system", "content": dataset_info})
 
-        # Add chat history if provided
-        for msg in req.chat_history:
+        # Add chat history if provided (keep only the last 6 messages to avoid token bloat)
+        recent_history = req.chat_history[-6:] if req.chat_history else []
+        for msg in recent_history:
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            
+            # Truncate massive assistant tables from previous turns so they don't blow up the context
+            if role == "assistant" and len(content) > 3000:
+                content = content[:3000] + "\n\n... [Data truncated to save context window] ..."
+                
             if role == "user":
                 messages.append({"role": "user", "content": content})
             elif role == "assistant":
@@ -151,7 +191,22 @@ async def chat(
 
         t_start = __import__("time").monotonic()
         try:
-            result = await agent.ainvoke({"messages": messages}, config=run_config)
+            # Temporary logging to trace token explosion
+            try:
+                import json
+                msg_dump = json.dumps(messages, default=str)
+                logger.info("agent_invoke_start", num_messages=len(messages), payload_len=len(msg_dump))
+                if len(msg_dump) > 500000:
+                    logger.warning("massive_payload", preview=msg_dump[:500] + "..." + msg_dump[-500:])
+                    with open("storage/massive_payload.json", "w", encoding="utf-8") as f:
+                        f.write(msg_dump)
+            except Exception as e:
+                pass
+                
+            result = await agent.ainvoke(
+                {"messages": messages},
+                config={**run_config, "recursion_limit": 50},
+            )
         except asyncio.CancelledError:
             logger.warning("agent_cancelled_by_client", user=context.user_id)
             raise
@@ -243,13 +298,17 @@ async def chat_stream(
         raise HTTPException(status_code=500, detail="Failed to resolve user context.")
 
     try:
-        agent = create_agent_executor(context, db_manager, user_context)
+        agent = create_agent_executor(context, db_manager, user_context, model_override=req.model)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to initialize the Insight Engine.")
 
     # Per-request state
     q: asyncio.Queue = asyncio.Queue()
     progress_bus.set_queue(q)
+
+    # Per-request DB cancellation event — set on client disconnect to abort pyodbc threads
+    _db_cancel = threading.Event()
+    db_set_cancel_event(_db_cancel)
 
     async def run_agent():
         """
@@ -265,13 +324,22 @@ async def chat_stream(
         """
         try:
             messages = []
-            dataset_info = await _get_active_datasets(context.user_id, db_manager)
+            # Inject session-scoped dataset context into system prompt
+            chat_session_id = request.headers.get("X-Session-Id", "")
+            dataset_info = await _get_active_datasets(context.user_id, chat_session_id, db_manager)
             if dataset_info:
                 messages.append({"role": "system", "content": dataset_info})
 
-            for msg in req.chat_history:
+            # Add chat history if provided (keep only the last 6 messages to avoid token bloat)
+            recent_history = req.chat_history[-6:] if req.chat_history else []
+            for msg in recent_history:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
+                
+                # Truncate massive assistant tables from previous turns so they don't blow up the context
+                if role == "assistant" and len(content) > 3000:
+                    content = content[:3000] + "\n\n... [Data truncated to save context window] ..."
+                    
                 if role == "user":
                     messages.append({"role": "user", "content": content})
                 elif role == "assistant":
@@ -283,6 +351,7 @@ async def chat_stream(
             langfuse_cb = None
             if tracer:
                 from app.agent.tracer import CustomLangfuseCallbackHandler
+                from app.agent.langfuse_context import current_tracer_cb
                 session_id = request.headers.get("X-Session-Id", "unknown")
                 cb = CustomLangfuseCallbackHandler(
                     tracer=tracer,
@@ -293,6 +362,7 @@ async def chat_stream(
                 )
                 langfuse_cb = cb
                 run_config["callbacks"] = [cb]
+                current_tracer_cb.set(cb)
 
             # Send user metadata first so the UI can set up the header
             meta = {
@@ -309,11 +379,12 @@ async def chat_stream(
             t_start = __import__("time").monotonic()
             full_reply = []
             token_buffer = []
-            BATCH_CHARS = 50  # flush a chunk every ~50 chars to balance TTFT vs re-render cost
+            BATCH_CHARS = 50  # flush a chunk every ~50 chars
+            _first_token_at: float | None = None
 
             async for event in agent.astream_events(
                 {"messages": messages},
-                config=run_config,
+                config={**run_config, "recursion_limit": 50},
                 version="v2",
             ):
                 kind = event.get("event", "")
@@ -335,6 +406,13 @@ async def chat_stream(
 
                     if not text:
                         continue
+
+                    if _first_token_at is None:
+                        _first_token_at = __import__("time").monotonic()
+                        ttft_ms = (_first_token_at - t_start) * 1000
+                        logger.info("chat_ttft", user=context.user_id,
+                                    ttft_ms=round(ttft_ms),
+                                    model=req.model or "(env-default)")
 
                     full_reply.append(text)
                     token_buffer.append(text)
@@ -369,13 +447,32 @@ async def chat_stream(
 
         except asyncio.CancelledError:
             logger.info("agent_task_cancelled", user=context.user_id)
+            _db_cancel.set()  # abort any in-flight pyodbc thread
             await q.put({"type": "cancelled"})
         except Exception as e:
             import traceback
             err_str = str(e)
             logger.error("agent_stream_failed", user=context.user_id, error=traceback.format_exc())
-            if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+
+            # Classify the error into a user-friendly message
+            err_lower = err_str.lower()
+            if "resource_exhausted" in err_str or "429" in err_str:
+                # True API rate limit
                 err_reply = "⏳ I'm temporarily rate-limited. Please wait 30–60 seconds and try again."
+            elif (
+                "timeout" in err_lower
+                or "deadline" in err_lower
+                or "timed out" in err_lower
+                or "deadlineexceeded" in err_lower
+            ):
+                # DB query or LLM inference timeout
+                err_reply = (
+                    "⏱️ This query took too long and timed out (>2 minutes).\n\n"
+                    "**Try one of these to speed it up:**\n"
+                    "- Use a shorter date range (e.g. 1–2 months instead of a full year)\n"
+                    "- Filter by a specific team or product\n"
+                    "- Ask for a summary by month instead of full detail"
+                )
             else:
                 err_reply = f"An error occurred: {err_str[:200]}"
             await q.put({"type": "error", "reply": err_reply})
@@ -386,23 +483,25 @@ async def chat_stream(
         yield f"data: {json.dumps({'type': 'status', 'message': 'Thinking...'})}\n\n"
 
         keepalive_counter = 0
-        total_ticks = 0
         prompt_shown = False
+        start_time = __import__("time").monotonic()
 
         while True:
             try:
                 item = await asyncio.wait_for(q.get(), timeout=0.1)
             except asyncio.TimeoutError:
                 keepalive_counter += 1
-                total_ticks += 1
                 if keepalive_counter >= 150:  # ~15s keepalive cadence
                     keepalive_counter = 0
                     yield ": keepalive\n\n"
                     
-                if total_ticks >= 6000 and not prompt_shown: # 10 mins = 600 seconds = 6000 ticks of 0.1s
+                elapsed = __import__("time").monotonic() - start_time
+                if elapsed >= 600 and not prompt_shown: # 10 mins
                     prompt_shown = True
                     timeout_msg = "⏳ This is taking longer than 10 mins. Would you like to proceed or stop and query with a shorter range or filter by team id?"
+                    # Send both a status message and a chunk so it physically appears in the chat window, rather than just the subtle spinner text
                     yield f"data: {json.dumps({'type': 'status', 'message': timeout_msg})}\n\n"
+                    yield f"data: {json.dumps({'type': 'chunk', 'content': timeout_msg + '\n\n'})}\n\n"
                     
                 continue
 

@@ -197,6 +197,53 @@ app.MapGet("/api/schema", async (AtcoGenie.Server.Application.Services.ISchemaSe
     return await schemaService.GetSchemasAsync();
 });
 
+// ─── USER MODEL PREFERENCE API ───────────────────────────────────────────────
+// Persists the user's selected LLM model in Redis so it survives page refresh.
+// The frontend interceptor calls PUT on model change; the query endpoint reads it.
+
+var VALID_MODELS = new HashSet<string> {
+    "gemini-3.1-flash-lite-preview", // Fast / lightweight (default)
+    "gemini-3.1-pro-preview",        // Thinking / deep reasoning
+};
+const string DEFAULT_MODEL = "gemini-3.1-flash-lite-preview";
+
+
+app.MapGet("/api/preferences/model", async (IConnectionMultiplexer redis, HttpContext httpContext) =>
+{
+    var user = httpContext.User?.Identity?.Name ?? "anonymous";
+    var username = user.Contains('\\') ? user.Split('\\').Last() : user;
+    var redisDb = redis.GetDatabase();
+    var model = (string?)await redisDb.StringGetAsync($"atcogenie:model-pref:{username.ToLower()}");
+    return Results.Ok(new { model = model ?? DEFAULT_MODEL });
+});
+
+app.MapPut("/api/preferences/model", async (
+    HttpContext httpContext,
+    IConnectionMultiplexer redis) =>
+{
+    var user = httpContext.User?.Identity?.Name ?? "anonymous";
+    var username = user.Contains('\\') ? user.Split('\\').Last() : user;
+
+    string? model = null;
+    try
+    {
+        using var doc = await System.Text.Json.JsonDocument.ParseAsync(httpContext.Request.Body);
+        doc.RootElement.TryGetProperty("model", out var modelProp);
+        model = modelProp.GetString();
+    }
+    catch { }
+
+    if (string.IsNullOrWhiteSpace(model) || !VALID_MODELS.Contains(model))
+        return Results.BadRequest(new { error = "Invalid model", valid = VALID_MODELS });
+
+    var redisDb = redis.GetDatabase();
+    await redisDb.StringSetAsync(
+        $"atcogenie:model-pref:{username.ToLower()}",
+        model,
+        TimeSpan.FromDays(90));   // persist for 90 days
+    return Results.Ok(new { model });
+});
+
 // MAIN GENIE API: Query endpoint (returns JSON, consumes Python SSE stream internally)
 app.MapPost("/api/query", async (
     AtcoGenie.Server.Application.DTOs.GenieQueryRequest request,
@@ -309,13 +356,26 @@ app.MapPost("/api/query", async (
     client.BaseAddress = new Uri(aiEngineUrl);
     client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
 
-    var payload = new { message = request.Prompt, chat_history = chatHistory };
+    // Resolve effective model: explicit request body > Redis user preference > null (Python .env default)
+    var effectiveModel = request.Model;
+    if (string.IsNullOrWhiteSpace(effectiveModel))
+    {
+        var savedModel = (string?)await redisDb.StringGetAsync($"atcogenie:model-pref:{username.ToLower()}");
+        effectiveModel = string.IsNullOrWhiteSpace(savedModel) ? null : savedModel;
+    }
+
+    var payload = new { message = request.Prompt, chat_history = chatHistory, model = effectiveModel };
     var jsonPayload = System.Text.Json.JsonSerializer.Serialize(payload);
     var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
     {
         Content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json")
     };
     httpRequest.Headers.Add("Authorization", $"Bearer {sessionToken}");
+    // Forward the chat session ID so Python can scope dataset lookups to this session
+    if (request.SessionId.HasValue)
+    {
+        httpRequest.Headers.Add("X-Session-Id", request.SessionId.Value.ToString());
+    }
 
     string replyText = "";
 
@@ -408,6 +468,163 @@ app.MapPost("/api/query", async (
     return Results.Empty;
 });
 
+// --- UPLOAD PROXY --- same-origin proxy so browser never hits Python directly (no CORS)
+// Auto-provisions a Python session token exactly like /api/query does.
+async Task<string?> GetOrProvisionPythonToken(
+    IConnectionMultiplexer redis, string username,
+    IServiceProvider services, ILogger<Program> logger)
+{
+    var redisDb = redis.GetDatabase();
+    var userKey = $"atcogenie:user-token:{username.ToLower()}";
+    var token = (string?)await redisDb.StringGetAsync(userKey);
+    if (!string.IsNullOrEmpty(token)) return token;
+
+    // Token missing — auto-provision same as /api/query
+    try
+    {
+        using var scope = services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ImdDbContext>();
+        var rights = await db.UserFormRights
+            .Where(u => u.SamAccountName.ToLower() == username.ToLower())
+            .ToListAsync();
+
+        object payload;
+        if (rights.Any())
+        {
+            var primary = rights.First();
+            payload = new
+            {
+                ad_user_id    = primary.SamAccountName ?? username,
+                employee_id   = primary.HcmsEmployeeId,
+                email         = primary.Email,
+                display_name  = primary.DisplayName,
+                department    = "N/A",
+                form_rights   = rights.Select(r => new
+                {
+                    security_user_id = r.SecurityUserId,
+                    ccode            = r.CCode,
+                    application_code = r.ApplicationCode,
+                    form_id          = r.FormId,
+                    add_mode         = r.AddMode,
+                    edit_mode        = r.EditMode,
+                    view_mode        = r.ViewMode,
+                    delete_mode      = r.DeleteMode
+                }).ToList()
+            };
+        }
+        else
+        {
+            payload = new
+            {
+                ad_user_id   = username,
+                employee_id  = "DEV-001",
+                email        = $"{username}@atcolab.local",
+                display_name = $"{username} (Dev)",
+                department   = "IT",
+                form_rights  = new[] { new { security_user_id=1, ccode="01", application_code="PharmaCRM", form_id="Report1", add_mode=false, edit_mode=false, view_mode=true, delete_mode=false } }
+            };
+        }
+
+        var newSid = Guid.NewGuid().ToString("N");
+        await redisDb.StringSetAsync($"atcogenie:session:{newSid}",
+            System.Text.Json.JsonSerializer.Serialize(payload), TimeSpan.FromMinutes(60));
+        await redisDb.StringSetAsync(userKey, newSid, TimeSpan.FromMinutes(60));
+        return newSid;
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to auto-provision session for {User}", username);
+        return null;
+    }
+}
+
+app.MapPost("/api/data/uploads", async (HttpContext httpContext,
+    IHttpClientFactory httpClientFactory, IConfiguration configuration, IConnectionMultiplexer redis) =>
+{
+    var user = httpContext.User?.Identity?.Name ?? "anonymous";
+    var username = user.Contains('\\') ? user.Split('\\').Last() : user;
+    var tok = await GetOrProvisionPythonToken(redis, username, app.Services, httpContext.RequestServices.GetRequiredService<ILogger<Program>>());
+    if (string.IsNullOrEmpty(tok)) return Results.Unauthorized();
+
+    var client = httpClientFactory.CreateClient("AiEngine");
+    client.BaseAddress = new Uri(configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000");
+    client.Timeout = TimeSpan.FromMinutes(2);
+
+    var content = new StreamContent(httpContext.Request.Body);
+    content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(
+        httpContext.Request.ContentType ?? "multipart/form-data");
+
+    var req = new HttpRequestMessage(HttpMethod.Post, "/api/data/uploads") { Content = content };
+    req.Headers.Add("Authorization", $"Bearer {tok}");
+    var sid = httpContext.Request.Headers["X-Session-Id"].FirstOrDefault();
+    if (!string.IsNullOrEmpty(sid)) req.Headers.Add("X-Session-Id", sid);
+
+    try
+    {
+        var resp = await client.SendAsync(req);
+        var body = await resp.Content.ReadAsStringAsync();
+        return Results.Content(body, "application/json", statusCode: (int)resp.StatusCode);
+    }
+    catch (Exception ex)
+    {
+        httpContext.RequestServices.GetRequiredService<ILogger<Program>>().LogError(ex, "Upload proxy failed");
+        return Results.Problem("Upload proxy error");
+    }
+});
+
+app.MapGet("/api/data/uploads/{uploadId}/status", async (string uploadId,
+    HttpContext httpContext, IHttpClientFactory httpClientFactory,
+    IConfiguration configuration, IConnectionMultiplexer redis) =>
+{
+    var user = httpContext.User?.Identity?.Name ?? "anonymous";
+    var username = user.Contains('\\') ? user.Split('\\').Last() : user;
+    var tok = await GetOrProvisionPythonToken(redis, username, app.Services, httpContext.RequestServices.GetRequiredService<ILogger<Program>>());
+    if (string.IsNullOrEmpty(tok)) return Results.Unauthorized();
+
+    var client = httpClientFactory.CreateClient("AiEngine");
+    client.BaseAddress = new Uri(configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000");
+    var req = new HttpRequestMessage(HttpMethod.Get, $"/api/data/uploads/{uploadId}/status");
+    req.Headers.Add("Authorization", $"Bearer {tok}");
+    var resp = await client.SendAsync(req);
+    return Results.Content(await resp.Content.ReadAsStringAsync(), "application/json", statusCode: (int)resp.StatusCode);
+});
+
+app.MapGet("/api/data/uploads", async (HttpContext httpContext,
+    IHttpClientFactory httpClientFactory, IConfiguration configuration, IConnectionMultiplexer redis) =>
+{
+    var user = httpContext.User?.Identity?.Name ?? "anonymous";
+    var username = user.Contains('\\') ? user.Split('\\').Last() : user;
+    var tok = await GetOrProvisionPythonToken(redis, username, app.Services, httpContext.RequestServices.GetRequiredService<ILogger<Program>>());
+    if (string.IsNullOrEmpty(tok)) return Results.Unauthorized();
+
+    var client = httpClientFactory.CreateClient("AiEngine");
+    client.BaseAddress = new Uri(configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000");
+    var req = new HttpRequestMessage(HttpMethod.Get, "/api/data/uploads");
+    req.Headers.Add("Authorization", $"Bearer {tok}");
+    var sid = httpContext.Request.Headers["X-Session-Id"].FirstOrDefault();
+    if (!string.IsNullOrEmpty(sid)) req.Headers.Add("X-Session-Id", sid);
+    var resp = await client.SendAsync(req);
+    return Results.Content(await resp.Content.ReadAsStringAsync(), "application/json", statusCode: (int)resp.StatusCode);
+});
+
+app.MapDelete("/api/data/uploads/{uploadId}", async (string uploadId,
+    HttpContext httpContext, IHttpClientFactory httpClientFactory,
+    IConfiguration configuration, IConnectionMultiplexer redis) =>
+{
+    var user = httpContext.User?.Identity?.Name ?? "anonymous";
+    var username = user.Contains('\\') ? user.Split('\\').Last() : user;
+    var tok = await GetOrProvisionPythonToken(redis, username, app.Services,
+        httpContext.RequestServices.GetRequiredService<ILogger<Program>>());
+    if (string.IsNullOrEmpty(tok)) return Results.Unauthorized();
+
+    var client = httpClientFactory.CreateClient("AiEngine");
+    client.BaseAddress = new Uri(configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000");
+    var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/data/uploads/{uploadId}");
+    req.Headers.Add("Authorization", $"Bearer {tok}");
+    var resp = await client.SendAsync(req);
+    return Results.Content(await resp.Content.ReadAsStringAsync(), "application/json", statusCode: (int)resp.StatusCode);
+});
+
 // --- CHAT HISTORY API ---
 
 // Register DB Context (InMemory for Prototype)
@@ -470,9 +687,47 @@ app.MapPut("/api/chats/{id}/archive", async (int id, AtcoGenie.Server.Applicatio
     return Results.Ok();
 });
 
-app.MapDelete("/api/chats/{id}", async (int id, AtcoGenie.Server.Application.Services.IChatHistoryService chatService) =>
+app.MapDelete("/api/chats/{id}", async (
+    int id,
+    AtcoGenie.Server.Application.Services.IChatHistoryService chatService,
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration,
+    IConnectionMultiplexer redis,
+    HttpContext httpContext) =>
 {
+    var user = httpContext.User;
+    var userName = user?.Identity?.Name ?? "anonymous";
+    var adUser = userName;
+    var username = adUser.Contains('\\') ? adUser.Split('\\').Last() : adUser;
+
     await chatService.DeleteSessionAsync(id);
+
+    // Cascade: remove all uploaded datasets tied to this chat session
+    try
+    {
+        var aiEngineUrl = configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000";
+        var redisDb = redis.GetDatabase();
+        var userKey = $"atcogenie:user-token:{username.ToLower()}";
+        var sessionToken = (string?)await redisDb.StringGetAsync(userKey);
+
+        if (!string.IsNullOrEmpty(sessionToken))
+        {
+            var client = httpClientFactory.CreateClient("AiEngine");
+            client.BaseAddress = new Uri(aiEngineUrl);
+            var deleteRequest = new HttpRequestMessage(
+                HttpMethod.Delete,
+                $"/api/data/uploads/by-session/{id}");
+            deleteRequest.Headers.Add("Authorization", $"Bearer {sessionToken}");
+            await client.SendAsync(deleteRequest);
+        }
+    }
+    catch (Exception ex)
+    {
+        // Non-fatal: log and continue. Files will remain on disk but DB row is already gone.
+        var logger = httpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogWarning(ex, "Failed to cascade-delete uploads for session {SessionId}", id);
+    }
+
     return Results.Ok();
 });
 
