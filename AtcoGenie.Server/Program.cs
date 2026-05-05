@@ -689,6 +689,12 @@ app.MapPut("/api/chats/{id}/archive", async (int id, AtcoGenie.Server.Applicatio
     return Results.Ok();
 });
 
+app.MapPut("/api/chats/{id}/unarchive", async (int id, AtcoGenie.Server.Application.Services.IChatHistoryService chatService) =>
+{
+    await chatService.UnarchiveSessionAsync(id);
+    return Results.Ok();
+});
+
 app.MapDelete("/api/chats/{id}", async (
     int id,
     AtcoGenie.Server.Application.Services.IChatHistoryService chatService,

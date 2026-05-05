@@ -327,6 +327,23 @@ class QwenChatLLM(BaseChatModel):
                 resp = await client.post(f"{self.base_url}/chat", json=payload)
                 resp.raise_for_status()
                 text = resp.json().get("response", "")
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout):
+            logger.warning("qwen_timeout", timeout=self.timeout)
+            friendly = (
+                "⏳ The Qwen model server is currently unresponsive (timeout). "
+                "This usually means the GPU is busy processing another request.\n\n"
+                "**Please try again in a moment**, or switch to **Gemini 3.1 Flash** "
+                "for instant responses."
+            )
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=friendly))])
+        except httpx.ConnectError:
+            logger.error("qwen_connect_failed", url=self.base_url)
+            friendly = (
+                "🔌 Cannot reach the Qwen model server at `{}`.\n\n"
+                "The server may be offline. Please try **Gemini 3.1 Flash** instead, "
+                "or contact IT to check the Qwen server status."
+            ).format(self.base_url)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=friendly))])
         except httpx.HTTPStatusError as e:
             logger.error("qwen_api_error", status=e.response.status_code, body=e.response.text[:300])
             raise
@@ -344,55 +361,34 @@ class QwenChatLLM(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        """Async streaming via POST /chat/stream (SSE) — primary path for astream_events."""
-        qwen_messages = _messages_to_qwen(messages, self._tool_schemas)
-        payload = _build_payload(qwen_messages, self.max_tokens, self.temperature, self.top_p)
+        """Async 'streaming' — calls /chat (non-streaming) and yields the full
+        response as a single chunk.
 
-        full_text: list[str] = []
+        Why not /chat/stream?  The Qwen server drops the TCP connection after
+        sending {"done": true} without properly terminating HTTP chunked encoding.
+        httpx raises RemoteProtocolError("incomplete chunked read") during context
+        manager cleanup — after all tokens have been read but before __aexit__
+        finishes.  There is no reliable way to suppress this on the client side
+        because the error fires inside the `async with` teardown, not in user code.
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/stream",
-                    json=payload,
-                ) as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line or not line.startswith("data:"):
-                            continue
-                        raw = line[len("data:"):].strip()
-                        try:
-                            event = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
+        Using /chat avoids the issue entirely.  At ~12 tok/s the 7B model produces
+        a full response in a few seconds — the UX difference is negligible.
+        """
+        # Reuse _agenerate which calls /chat safely
+        result = await self._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
-                        if "token" in event:
-                            token = event["token"]
-                            full_text.append(token)
-                            chunk = ChatGenerationChunk(
-                                message=AIMessageChunk(content=token)
-                            )
-                            if run_manager:
-                                await run_manager.on_llm_new_token(token)
-                            yield chunk
-                        elif event.get("done"):
-                            break
-                        elif "error" in event:
-                            logger.error("qwen_stream_error", error=event["error"])
-                            break
-        except Exception as e:
-            if _is_benign_stream_error(e) and full_text:
-                # Qwen server closed connection after sending all tokens — harmless
-                logger.debug("qwen_stream_closed_benign", tokens=len(full_text))
-            else:
-                logger.error("qwen_astream_failed", error=str(e))
-                raise
+        ai_msg = result.generations[0].message
+        content = ai_msg.content or ""
 
-        # Check for tool calls in accumulated output
-        combined = "".join(full_text)
-        tool_calls = _parse_tool_calls(combined) if self._tool_schemas else []
-        if tool_calls:
+        # Yield the full text as one chunk
+        if content:
+            chunk = ChatGenerationChunk(message=AIMessageChunk(content=content))
+            if run_manager:
+                await run_manager.on_llm_new_token(content)
+            yield chunk
+
+        # If there were tool calls, yield them as a separate chunk
+        if hasattr(ai_msg, "tool_calls") and ai_msg.tool_calls:
             yield ChatGenerationChunk(
-                message=AIMessageChunk(content="", tool_calls=tool_calls)
+                message=AIMessageChunk(content="", tool_calls=ai_msg.tool_calls)
             )

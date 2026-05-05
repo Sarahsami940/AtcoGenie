@@ -1,4 +1,4 @@
-﻿/**
+/**
  * AtcoGenie â€” Theme Init v4
  *
  * - Sidebar: #071D44 solid + bright gradient blobs (#1657CB light end)
@@ -163,14 +163,30 @@
     el.querySelectorAll("*").forEach(c => c.style.setProperty("color", "#ffffff", "important"));
   }
 
+  /* ── Helper: check if element is inside a floating popup layer ── */
+  function isInsideFloatingLayer(el) {
+    let node = el;
+    while (node && node !== document.body) {
+      const pos = window.getComputedStyle(node).position;
+      if (pos === "fixed" || pos === "absolute") {
+        // Check if it has high z-index (popup indicator)
+        const z = parseInt(window.getComputedStyle(node).zIndex, 10);
+        if (z >= 100) return true;
+      }
+      if (node.matches && node.matches('[role="menu"], [role="listbox"], [role="dialog"], [role="tooltip"]')) return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+
   function paintChildren(sb) {
-    // 1. Strip light backgrounds â€” skip overlays, menus, and any absolute/fixed elements
+    // 1. Strip light backgrounds — skip overlays, menus, and any absolute/fixed elements
     sb.querySelectorAll("*").forEach(el => {
       if (el.classList.contains("ag-sb-blob")) return;
       // Skip any element that is (or is inside) a floating/popup layer
       const pos = window.getComputedStyle(el).position;
       if (pos === "absolute" || pos === "fixed") return;
-      if (el.closest('[role="menu"], [role="listbox"], [role="dialog"], [role="tooltip"]')) return;
+      if (isInsideFloatingLayer(el)) return;
       const bg = window.getComputedStyle(el).backgroundColor;
       if (isLightBg(bg)) {
         el.style.setProperty("background-color", "transparent", "important");
@@ -568,7 +584,79 @@
       });
     });
   }
+
+  /* ── Fix 3-dot dropdown menu: opaque background + close on outside click ── */
+  function fixDropdownMenus() {
+    // 1. Inject CSS to force opaque background on floating dropdown menus
+    if (!document.getElementById("ag-dropdown-fix")) {
+      const style = document.createElement("style");
+      style.id = "ag-dropdown-fix";
+      style.textContent = `
+        /* Force opaque bg on the sidebar 3-dot dropdown menu */
+        [data-ag-sidebar] div[style*="position: fixed"][style*="z-index"],
+        [data-ag-sidebar] div[style*="position:fixed"],
+        div[class*="z-[200]"],
+        div[class*="shadow-xl"][class*="rounded-lg"][class*="bg-white"] {
+          background-color: #1e293b !important;
+          background: #1e293b !important;
+          border-color: rgba(255,255,255,0.12) !important;
+        }
+        /* Menu item text should be light */
+        div[class*="z-[200]"] button,
+        div[style*="position: fixed"][style*="z-index"] button {
+          color: #e2e8f0 !important;
+        }
+        div[class*="z-[200]"] button:hover,
+        div[style*="position: fixed"][style*="z-index"] button:hover {
+          background-color: rgba(255,255,255,0.1) !important;
+        }
+        /* Red hover for delete */
+        div[class*="z-[200]"] button[class*="hover:bg-red"],
+        div[style*="position: fixed"][style*="z-index"] button[class*="hover:bg-red"] {
+          color: #fca5a5 !important;
+        }
+        div[class*="z-[200]"] button[class*="hover:bg-red"]:hover,
+        div[style*="position: fixed"][style*="z-index"] button[class*="hover:bg-red"]:hover {
+          background-color: rgba(220,38,38,0.15) !important;
+        }
+        /* SVG icons in menu */
+        div[class*="z-[200]"] svg,
+        div[style*="position: fixed"][style*="z-index"] svg {
+          color: #94a3b8 !important;
+          stroke: #94a3b8 !important;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // 2. Click-outside handler to close the 3-dot dropdown
+    //    The SPA already has a window click handler (A(null)), but our theme's
+    //    stopPropagation on sidebar hover listeners can prevent it from firing.
+    //    This handler observes the DOM for the dropdown and closes it when
+    //    clicking outside.
+    document.addEventListener("click", function (e) {
+      // Find any open dropdown inside sidebar (position:fixed with high z-index)
+      const dropdowns = document.querySelectorAll('[data-ag-sidebar] div[style*="position"]');
+      dropdowns.forEach(function (dd) {
+        const z = parseInt(dd.style.zIndex || window.getComputedStyle(dd).zIndex, 10);
+        if (z < 100) return; // not a popup
+        if (dd.contains(e.target)) return; // clicked inside
+        // Check if the click was on the 3-dot button itself (the ⋮ trigger)
+        const trigger = e.target.closest('button');
+        if (trigger) {
+          const txt = trigger.textContent?.trim() || "";
+          if (txt === "⋮" || txt === "…" || txt === "•••" || txt.length <= 1) return;
+        }
+        // Close by clicking the document body (triggers the SPA's A(null) handler)
+        dd.style.display = "none";
+        // Also hide after a frame so React state catches up
+        requestAnimationFrame(() => { dd.style.display = "none"; });
+      });
+    }, true); // capture phase to fire before stopPropagation
+  }
+
   function boot() {
+    fixDropdownMenus();
     injectMainBlobs();
     enhanceInputBar();
     observeMessages();

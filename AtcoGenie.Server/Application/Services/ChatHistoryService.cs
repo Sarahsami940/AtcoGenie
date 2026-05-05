@@ -11,6 +11,7 @@ public interface IChatHistoryService
     Task<ChatSession> CreateSessionAsync(string userId, string title, string modelId);
     Task AddMessageAsync(int sessionId, string sender, string content);
     Task ArchiveSessionAsync(int sessionId);
+    Task UnarchiveSessionAsync(int sessionId);
     Task DeleteSessionAsync(int sessionId);
     Task RenameSessionAsync(int sessionId, string newTitle);
 }
@@ -87,6 +88,16 @@ public class ChatHistoryService : IChatHistoryService
         if (session != null)
         {
             session.IsArchived = true;
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    public async Task UnarchiveSessionAsync(int sessionId)
+    {
+        var session = await _context.ChatSessions.FindAsync(sessionId);
+        if (session != null)
+        {
+            session.IsArchived = false;
             await _context.SaveChangesAsync();
         }
     }
