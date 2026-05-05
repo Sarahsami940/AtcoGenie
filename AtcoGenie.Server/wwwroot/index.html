@@ -3,6 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <!-- AtcoGenie Premium Dark Theme -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/theme-override.css?v=14">
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AtcoGenie</title>
 
@@ -27,7 +31,9 @@
 
       /* 2. Virtual table rendering: skip layout + paint for off-screen rows.
             For a 200-row table this cuts initial render time by ~75%.
-            contain-intrinsic-size preserves scrollbar accuracy. */
+            contain-intrinsic-size preserves scrollbar accuracy.
+            NOTE: table-enhancer.js overrides content-visibility on enhanced
+            tables so that sticky headers and correct row counts work. */
       .overflow-x-auto table,
       [class*="overflow"] table,
       table {
@@ -35,11 +41,9 @@
         contain-intrinsic-block-size: auto 500px;
       }
 
-      /* 3. Isolate table container reflow from the rest of the page.
-            A large table resize no longer triggers a full-document layout. */
-      .overflow-x-auto {
-        contain: layout style;
-      }
+      /* 3. REMOVED: contain:layout style on .overflow-x-auto was blocking
+            horizontal overflow / scroll — tables were clipped, not scrollable.
+            table-enhancer.js now manages table container behaviour instead. */
 
       /* 4. Chat area smooth-scroll conflicts with streaming: auto is instant
             and avoids the visible scroll-bounce during generation. */
@@ -55,14 +59,20 @@
     <div id="root"></div>
 
     <!-- Model selector v5 — optimistic update + capture-phase close handler -->
-    <script src="/model-selector.js?v=5"></script>
+    <script src="/model-selector.js?v=7"></script>
 
 
     <!-- User message copy button — loaded as a real static file, not via SPA fallback -->
     <script src="/copy-user-msg.js?v=3" defer></script>
 
-    <!-- Excel Upload Panel v6 — session-scoped, persistent pills -->
-    <script src="/upload-panel.js?v=6" defer></script>
+    <!-- Excel Upload Panel v16 — strict session scoping, filename dedup -->
+    <script src="/upload-panel.js?v=16" defer></script>
+
+    <!-- Table Enhancer v3 — wide messages, full columns, capped height + sticky header -->
+    <script src="/table-enhancer.js?v=5" defer></script>
+
+    <!-- AtcoGenie Theme Init — gradient blobs + interaction enhancements -->
+    <script src="/theme-init.js?v=14" defer></script>
 
   </body>
 </html>

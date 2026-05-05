@@ -1,0 +1,447 @@
+/* ============================================================
+   AtcoGenie — Split Theme v4
+   Sidebar: #071D44 solid + #1657CB gradient blobs
+   Main: light/white chat area
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* ── TOKENS ──────────────────────────────────────────────── */
+:root {
+  --sb:            #071D44;
+  --sb-blob:       #1657CB;
+  --sb-hover:      rgba(255,255,255,0.09);
+  --sb-active:     rgba(255,255,255,0.14);
+  --sb-border:     rgba(255,255,255,0.07);
+  --sb-text:       #c5d8f8;
+  --sb-heading:    rgba(197,216,248,0.45);
+  --sb-white:      #ffffff;
+
+  --main-bg:       #f0f3f9;
+  --main-surface:  #ffffff;
+  --main-text:     #1e293b;
+  --main-muted:    #64748b;
+  --main-border:   #e2e8f0;
+
+  --blue-600: #2563eb;
+  --blue-700: #1d4ed8;
+}
+
+/* ── GLOBAL ───────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root {
+  height: 100%;
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif !important;
+  background: var(--main-bg) !important;
+}
+
+/* ── SCROLLBARS ───────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.35); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.65); }
+[data-ag-sidebar] ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); }
+[data-ag-sidebar] ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.35); }
+
+/* ─────────────────────────────────────────────────────────── */
+/*  SIDEBAR — stamped with [data-ag-sidebar] by JS            */
+/* ─────────────────────────────────────────────────────────── */
+
+[data-ag-sidebar] {
+  background: var(--sb) !important;
+  border-right: 1px solid var(--sb-border) !important;
+  position: relative !important;
+  overflow: hidden !important;   /* contain blobs */
+}
+
+/* All text inside sidebar → light */
+[data-ag-sidebar] * {
+  color: var(--sb-text) !important;
+  border-color: var(--sb-border) !important;
+}
+
+/* Section labels */
+[data-ag-sidebar] [class*="uppercase"],
+[data-ag-sidebar] [class*="tracking-w"],
+[data-ag-sidebar] [class*="text-xs"][class*="font-semibold"],
+[data-ag-sidebar] [class*="text-xs"][class*="font-medium"] {
+  color: var(--sb-heading) !important;
+  font-size: 10px !important;
+  letter-spacing: 0.1em !important;
+  font-weight: 600 !important;
+  text-transform: uppercase !important;
+}
+
+/* Hover */
+[data-ag-sidebar] button:hover,
+[data-ag-sidebar] a:hover,
+[data-ag-sidebar] [role="button"]:hover {
+  background: var(--sb-hover) !important;
+  border-radius: 8px !important;
+  color: var(--sb-white) !important;
+}
+[data-ag-sidebar] button:hover *,
+[data-ag-sidebar] a:hover *,
+[data-ag-sidebar] [role="button"]:hover * {
+  color: var(--sb-white) !important;
+}
+
+/* Active item */
+[data-ag-sidebar] [class*="bg-blue"],
+[data-ag-sidebar] [aria-current="true"],
+[data-ag-sidebar] [aria-selected="true"] {
+  background: var(--sb-active) !important;
+  border-radius: 8px !important;
+}
+[data-ag-sidebar] [class*="bg-blue"] *,
+[data-ag-sidebar] [aria-current="true"] * {
+  color: var(--sb-white) !important;
+}
+
+/* Remove white/light bg overrides inside sidebar */
+[data-ag-sidebar] [class*="bg-white"],
+[data-ag-sidebar] [class*="bg-slate"],
+[data-ag-sidebar] [class*="bg-blue-50"],
+[data-ag-sidebar] [class*="bg-blue-100"] {
+  background: transparent !important;
+}
+
+/* Folder left-border accent */
+[data-ag-sidebar] [class*="border-l"] {
+  border-left-color: #60a5fa !important;
+  box-shadow: -2px 0 8px rgba(96,165,250,0.2) inset;
+}
+
+/* New Chat button */
+[data-ag-sidebar] button[class*="bg-blue"],
+[data-ag-sidebar] a[class*="bg-blue"] {
+  background: #1657CB !important;
+  border: 1px solid rgba(255,255,255,0.2) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.3) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+[data-ag-sidebar] button[class*="bg-blue"] *,
+[data-ag-sidebar] a[class*="bg-blue"] * {
+  color: #ffffff !important;
+}
+
+/* Sidebar blob elements (injected by JS) */
+.ag-sb-blob {
+  position: absolute !important;
+  border-radius: 50% !important;
+  pointer-events: none !important;
+  z-index: 0 !important;
+}
+
+/* Everything ABOVE the blobs */
+[data-ag-sidebar] > *:not(.ag-sb-blob) {
+  position: relative !important;
+  z-index: 1 !important;
+}
+
+/* ── Employee / user profile tag — very compact ─────────── */
+[data-ag-sidebar] [class*="rounded-full"] + div,
+[data-ag-sidebar] [class*="avatar"] ~ div,
+[data-ag-sidebar] [class*="text-xs"] {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  line-height: 1 !important;
+  font-size: 10px !important;
+}
+/* Reduce the profile row container itself */
+[data-ag-sidebar] [class*="flex"][class*="items-center"][class*="p-2"],
+[data-ag-sidebar] [class*="flex"][class*="items-center"][class*="p-3"],
+[data-ag-sidebar] [class*="flex"][class*="items-center"][class*="py-"] {
+  padding-top: 3px !important;
+  padding-bottom: 3px !important;
+}
+
+/* Chats / Archived tab buttons — bright readable text */
+[data-ag-sidebar] button[class*="py-1"],
+[data-ag-sidebar] button[class*="py-2"] {
+  color: rgba(255,255,255,0.85) !important;
+  font-weight: 600 !important;
+  font-size: 12px !important;
+}
+[data-ag-sidebar] button[class*="py-1"] *,
+[data-ag-sidebar] button[class*="py-2"] * {
+  color: rgba(255,255,255,0.85) !important;
+}
+
+/* ── Dropdown / Popover / Context menus — dark opaque bg ── */
+[role="menu"],
+[role="listbox"],
+[role="dialog"] {
+  background: #0f2952 !important;
+  border: 1px solid rgba(255,255,255,0.15) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55) !important;
+  z-index: 9999 !important;
+}
+[role="menu"] *,
+[role="listbox"] *,
+[role="dialog"] p,
+[role="dialog"] span,
+[role="dialog"] label {
+  color: #e2e8f0 !important;
+  background-color: transparent !important;
+}
+[role="menuitem"]:hover,
+[role="option"]:hover {
+  background: rgba(255,255,255,0.12) !important;
+  border-radius: 6px !important;
+}
+
+/* ── Active (currently open) chat item ─────────────────── */
+[data-ag-active-chat] {
+  background: rgba(255,255,255,0.16) !important;
+  border-left: 3px solid #60a5fa !important;
+  border-radius: 0 8px 8px 0 !important;
+  box-shadow: -2px 0 12px rgba(96,165,250,0.25) inset !important;
+}
+[data-ag-active-chat] * { color: #ffffff !important; }
+
+
+/* ── MAIN CONTENT AREA ───────────────────────────────────────── */
+
+/* Chat header bar — reduced height, theme icon stays right */
+[data-ag-header-done] {
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+  min-height: unset !important;
+  max-width: 900px !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+}
+
+/* ATCO Genie heading — black-to-blue gradient */
+[data-ag-header-done] h1,
+[data-ag-header-done] [class*="font-bold"],
+[data-ag-header-done] [class*="font-semibold"],
+[data-ag-header-done] span:not([class*="sr-only"]) {
+  background: linear-gradient(to right, #000000 0%, #1657CB 100%) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* Theme toggle icon — ensure it stays at the right */
+[data-ag-header-done] {
+  display: flex !important;
+  align-items: center !important;
+}
+[data-ag-header-done] > *:last-child {
+  margin-left: auto !important;
+}
+
+
+main,
+[class*="flex-1"][class*="overflow"],
+[class*="flex-1"][class*="h-full"] {
+  background: var(--main-bg) !important;
+  color: var(--main-text) !important;
+}
+
+/* AI message bubble */
+[class*="rounded-2xl"][class*="bg-white"],
+[class*="rounded-xl"][class*="bg-white"],
+.bg-white.rounded-2xl,
+.bg-white.rounded-xl {
+  background: var(--main-surface) !important;
+  border: 1px solid var(--main-border) !important;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.06) !important;
+  color: var(--main-text) !important;
+  backdrop-filter: none !important;
+}
+
+/* ── USER MESSAGE BUBBLES ─────────────────────────────────── */
+/*
+ * Strategy 1 — class-based (works if SPA uses bg-blue-* + rounded)
+ * Strategy 2 — layout-based (justify-end flex row → first child = bubble)
+ * Strategy 3 — JS stamps [data-ag-user-bubble] for a guaranteed hook
+ */
+
+/* Strategy 1 */
+[class*="bg-blue-600"][class*="rounded"],
+[class*="bg-blue-500"][class*="rounded"],
+.bg-blue-600.rounded-2xl,
+.bg-blue-600.rounded-xl,
+.bg-blue-500.rounded-2xl {
+  background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
+  box-shadow: 0 2px 12px rgba(29,78,216,0.3) !important;
+  color: #ffffff !important;
+}
+
+/* Strategy 2 — right-aligned message rows in main chat */
+main [class*="justify-end"] > div,
+main [class*="justify-end"] > p,
+[data-ag-chat] [class*="justify-end"] > div {
+  background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
+  color: #ffffff !important;
+  border-radius: 18px 18px 4px 18px !important;
+  padding: 10px 16px !important;
+  max-width: 72% !important;
+  width: fit-content !important;
+  align-self: flex-end !important;
+  box-shadow: 0 2px 12px rgba(29,78,216,0.3) !important;
+  word-break: break-word !important;
+}
+main [class*="justify-end"] > div *,
+main [class*="justify-end"] > p * {
+  color: #ffffff !important;
+  background: transparent !important;
+}
+
+/* Strategy 3 — JS-stamped attribute */
+[data-ag-user-bubble] {
+  background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
+  color: #ffffff !important;
+  border-radius: 18px 18px 4px 18px !important;
+  padding: 10px 16px !important;
+  max-width: 72% !important;
+  width: fit-content !important;
+  margin-left: auto !important;
+  box-shadow: 0 2px 12px rgba(29,78,216,0.3) !important;
+  word-break: break-word !important;
+  display: block !important;
+}
+[data-ag-user-bubble] * {
+  color: #ffffff !important;
+  background: transparent !important;
+}
+
+/* Ensure the row is right-aligned */
+[data-ag-user-row] {
+  display: flex !important;
+  justify-content: flex-end !important;
+  padding: 4px 16px !important;
+}
+
+/* Text */
+.text-slate-900, .text-slate-800 { color: #1e293b !important; }
+.text-slate-700                   { color: #334155 !important; }
+.text-slate-600, .text-slate-500  { color: #64748b !important; }
+.text-slate-400                   { color: #94a3b8 !important; }
+
+/* Suggestion cards */
+[class*="rounded-xl"][class*="border"][class*="p-4"],
+[class*="rounded-lg"][class*="border"][class*="p-4"] {
+  background: var(--main-surface) !important;
+  border-color: var(--main-border) !important;
+  color: var(--main-muted) !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05) !important;
+  transition: all 0.18s ease !important;
+}
+[class*="rounded-xl"][class*="border"][class*="p-4"]:hover,
+[class*="rounded-lg"][class*="border"][class*="p-4"]:hover {
+  border-color: rgba(37,99,235,0.35) !important;
+  box-shadow: 0 4px 16px rgba(37,99,235,0.1) !important;
+  transform: translateY(-2px) !important;
+}
+
+/* ── INPUT BAR ────────────────────────────────────────────── */
+form,
+[class*="rounded-2xl"][class*="border"][class*="bg-white"],
+[class*="rounded-3xl"][class*="border"][class*="bg-white"] {
+  background: var(--main-surface) !important;
+  border: 1px solid var(--main-border) !important;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.07) !important;
+  backdrop-filter: none !important;
+}
+textarea {
+  background: transparent !important;
+  color: var(--main-text) !important;
+  caret-color: var(--blue-600) !important;
+}
+textarea::placeholder { color: #94a3b8 !important; }
+
+button[class*="bg-blue-600"],
+button[class*="bg-blue-500"] {
+  background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
+  box-shadow: 0 2px 8px rgba(37,99,235,0.35) !important;
+  transition: all 0.18s ease !important;
+}
+button[class*="bg-blue-600"]:hover { transform: scale(1.06) !important; }
+
+/* ── TABLES ───────────────────────────────────────────────── */
+table { border-collapse: collapse !important; }
+th {
+  background: #eff6ff !important;
+  color: #1d4ed8 !important;
+  border-bottom: 2px solid #bfdbfe !important;
+  font-size: 11px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  padding: 10px 12px !important;
+}
+td {
+  border-bottom: 1px solid #f1f5f9 !important;
+  color: #334155 !important;
+  padding: 9px 12px !important;
+  font-size: 13px !important;
+}
+tr:hover td { background: #f0f7ff !important; }
+
+/* ── CODE ─────────────────────────────────────────────────── */
+pre, code {
+  background: #f1f5f9 !important;
+  border: 1px solid #e2e8f0 !important;
+  color: #1d4ed8 !important;
+  border-radius: 8px !important;
+}
+pre code { border: none !important; background: transparent !important; }
+
+/* ── MODALS ───────────────────────────────────────────────── */
+.bg-black\/50 {
+  background: rgba(7,29,68,0.5) !important;
+  backdrop-filter: blur(4px) !important;
+}
+
+/* ── UPLOAD PANEL (dark sidebar) ──────────────────────────── */
+#genie-file-panel {
+  background: rgba(255,255,255,0.06) !important;
+  border-color: rgba(255,255,255,0.1) !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+#genie-file-panel-header { background: rgba(255,255,255,0.08) !important; }
+#genie-file-panel-title  { color: #93c5fd !important; }
+#genie-file-panel-count  { background: rgba(255,255,255,0.15) !important; color: #bfdbfe !important; }
+.gfp-item { background: rgba(255,255,255,0.05) !important; border-color: rgba(255,255,255,0.08) !important; }
+.gfp-item:hover { background: rgba(255,255,255,0.1) !important; }
+.gfp-item-name { color: #e2e8f0 !important; }
+.gfp-item-meta { color: #94a3b8 !important; }
+
+/* ── MODEL SELECTOR ───────────────────────────────────────── */
+#ag-model-pill {
+  background: #eff6ff !important;
+  border-color: #bfdbfe !important;
+  color: #1e40af !important;
+}
+#ag-model-pill:hover { background: #dbeafe !important; }
+#ag-model-pill .ag-pill-label { color: #1d4ed8 !important; }
+#ag-model-pill .ag-pill-caret { color: #3b82f6 !important; }
+
+/* ── ANIMATIONS ───────────────────────────────────────────── */
+@keyframes msgSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes agSbBlob1 {
+  0%   { transform: translate(0,0) scale(1); }
+  40%  { transform: translate(20px,-18px) scale(1.08); }
+  100% { transform: translate(-14px,22px) scale(0.95); }
+}
+@keyframes agSbBlob2 {
+  0%   { transform: translate(0,0) scale(1); }
+  45%  { transform: translate(-18px,24px) scale(1.06); }
+  100% { transform: translate(22px,-16px) scale(0.97); }
+}
+@keyframes agSbBlob3 {
+  0%   { transform: translate(0,0) scale(1); }
+  50%  { transform: translate(10px,20px) scale(1.04); }
+  100% { transform: translate(-10px,-18px) scale(0.98); }
+}
