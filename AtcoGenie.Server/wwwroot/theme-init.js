@@ -301,13 +301,19 @@
     sb.querySelectorAll("button, a, li, [role='button'], [class*='cursor-pointer']").forEach(el => {
       if (el.dataset.agHover) return;
       if (el === newChatBtn) return; // skip new-chat button
+      // Skip the 3-dot trigger button — its visibility is handled by CSS
+      if (el.classList.contains("opacity-0") || (el.className || "").toString().includes("group-hover")) return;
       el.dataset.agHover = "1";
 
       el.addEventListener("mouseenter", () => {
         if (!el.dataset.agActive) {
           el.style.setProperty("background", SB_HOVER, "important");
           el.style.setProperty("border-radius", "8px", "important");
-          el.querySelectorAll("*").forEach(c => c.style.setProperty("color", SB_WHITE, "important"));
+          el.querySelectorAll("*").forEach(c => {
+            // Don't touch children that are inside opacity-0 buttons (3-dot trigger)
+            if (c.closest && c.closest('button[class*="opacity-0"]')) return;
+            c.style.setProperty("color", SB_WHITE, "important");
+          });
           el.style.setProperty("color", SB_WHITE, "important");
         }
       });
@@ -315,7 +321,10 @@
         if (!el.dataset.agActive) {
           el.style.removeProperty("background");
           el.style.setProperty("color", SB_TEXT, "important");
-          el.querySelectorAll("*").forEach(c => c.style.setProperty("color", SB_TEXT, "important"));
+          el.querySelectorAll("*").forEach(c => {
+            if (c.closest && c.closest('button[class*="opacity-0"]')) return;
+            c.style.setProperty("color", SB_TEXT, "important");
+          });
         }
       });
     });
@@ -624,6 +633,67 @@
         div[style*="position: fixed"][style*="z-index"] svg {
           color: #94a3b8 !important;
           stroke: #94a3b8 !important;
+        }
+
+        /* ── 3-dot trigger button: force visible on parent hover ── */
+        /* The ⋮ button uses opacity-0 + group-hover:opacity-100 but our
+           inline color overrides make the SVG invisible even at opacity:1.
+           Fix: force the button visible on group hover and ensure SVG contrast. */
+        .group:hover > div > button[class*="opacity-0"],
+        .group:hover button[class*="group-hover:opacity-100"],
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"] {
+          opacity: 1 !important;
+        }
+        /* Ensure the dots SVG inside the trigger is always visible */
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"] svg,
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"] svg path {
+          stroke: rgba(255,255,255,0.7) !important;
+          color: rgba(255,255,255,0.7) !important;
+        }
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"]:hover {
+          background: rgba(255,255,255,0.15) !important;
+          border-radius: 6px !important;
+        }
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"]:hover svg,
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"]:hover svg path {
+          stroke: #ffffff !important;
+          color: #ffffff !important;
+        }
+
+        /* ── Sidebar chat list: spacing + readability ── */
+        /* Chat items — more breathing room, lighter weight */
+        [data-ag-sidebar] .group,
+        [data-ag-sidebar] button[class*="text-left"],
+        [data-ag-sidebar] div[class*="relative group"] {
+          padding-top: 8px !important;
+          padding-bottom: 8px !important;
+          margin-bottom: 2px !important;
+        }
+        /* Chat title text — lighter, smaller */
+        [data-ag-sidebar] .group span,
+        [data-ag-sidebar] .group p,
+        [data-ag-sidebar] button[class*="text-left"] span,
+        [data-ag-sidebar] button[class*="truncate"] {
+          font-weight: 400 !important;
+          font-size: 13px !important;
+          letter-spacing: 0.01em !important;
+          line-height: 1.4 !important;
+        }
+        /* Folder items — less visual clutter */
+        [data-ag-sidebar] div[class*="ml-5"],
+        [data-ag-sidebar] div[class*="pl-2"] {
+          border-left-color: rgba(255,255,255,0.06) !important;
+        }
+        /* Folder headers — cleaner */
+        [data-ag-sidebar] button[class*="font-medium"] {
+          font-weight: 500 !important;
+          font-size: 12.5px !important;
+        }
+        /* Chat icon (speech bubble) — subtler */
+        [data-ag-sidebar] .group svg:not([class*="h-3"]) {
+          opacity: 0.5 !important;
+          width: 14px !important;
+          height: 14px !important;
         }
       `;
       document.head.appendChild(style);
