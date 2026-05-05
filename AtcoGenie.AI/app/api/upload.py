@@ -37,10 +37,12 @@ CREATE TABLE IF NOT EXISTS document_uploads (
     schema_json JSONB NOT NULL DEFAULT '{}',
     status VARCHAR(20) DEFAULT 'processing',
     error_message TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')
 );
 CREATE INDEX IF NOT EXISTS idx_uploads_session ON document_uploads(session_id);
 CREATE INDEX IF NOT EXISTS idx_uploads_user ON document_uploads(user_id);
+CREATE INDEX IF NOT EXISTS idx_uploads_expires ON document_uploads(expires_at);
 """
 
 # Columns that may be missing from older table versions.
@@ -50,6 +52,8 @@ _COLUMN_MIGRATIONS = [
     "ALTER TABLE document_uploads ADD COLUMN IF NOT EXISTS sheet_names JSONB DEFAULT '[]'",
     "ALTER TABLE document_uploads ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'processing'",
     "ALTER TABLE document_uploads ADD COLUMN IF NOT EXISTS error_message TEXT",
+    "ALTER TABLE document_uploads ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')",
+    "CREATE INDEX IF NOT EXISTS idx_uploads_expires ON document_uploads(expires_at)",
 ]
 
 
@@ -178,6 +182,15 @@ async def process_excel_to_parquet(
         if drop_cols:
             df.drop(columns=drop_cols, inplace=True)
 
+        # ── DEBUG: Print column structure + first rows to console ─────
+        print(f"\n{'='*60}")
+        print(f"UPLOAD DEBUG — {original_filename}")
+        print(f"Sheets: {sheet_names}  |  Total rows: {len(df)}  |  Columns: {len(df.columns)}")
+        print(f"Columns: {list(df.columns)}")
+        print(f"Dtypes:\n{df.dtypes}")
+        print(f"\ndf.head():\n{df.head().to_string()}")
+        print(f"{'='*60}\n")
+
         # Coerce mixed-type object columns to string for pyarrow.
         # Preserves actual NaN/None as None (not the string "nan").
         for col in df.columns:
@@ -303,8 +316,8 @@ async def upload_dataset(
                     """
                     INSERT INTO document_uploads
                         (id, user_id, session_id, filename, parquet_path,
-                         row_count, schema_json, sheet_names, status)
-                    VALUES ($1,$2,$3,$4,$5,0,'{}','[]','processing')
+                         row_count, schema_json, sheet_names, status, expires_at)
+                    VALUES ($1,$2,$3,$4,$5,0,'{}','[]','processing', CURRENT_TIMESTAMP + INTERVAL '24 hours')
                     """,
                     upload_id,
                     user_id,
@@ -559,3 +572,66 @@ async def delete_session_uploads(session_id: str, request: Request):
     except Exception as e:
         logger.error("delete_session_uploads_failed", session_id=session_id, error=str(e))
         raise HTTPException(status_code=500, detail="Failed to delete session uploads.")
+
+# ─── Cleanup Job ─────────────────────────────────────────────────────────────
+
+async def _cleanup_expired_uploads(db_manager: DatabaseManager):
+    """
+    Periodically queries the database for expired uploads and deletes them
+    from disk and the database.
+    """
+    while True:
+        try:
+            pool = db_manager.get_pool("postgres")
+            if pool:
+                async with pool.acquire() as conn:
+                    # Find expired records
+                    rows = await conn.fetch(
+                        "SELECT id, parquet_path FROM document_uploads WHERE expires_at < CURRENT_TIMESTAMP"
+                    )
+                    
+                    if rows:
+                        for row in rows:
+                            upload_id = str(row["id"])
+                            path = row["parquet_path"]
+                            
+                            # Attempt to delete the file
+                            if path and os.path.exists(path):
+                                try:
+                                    os.remove(path)
+                                    logger.info("expired_file_deleted", upload_id=upload_id, path=path)
+                                except Exception as e:
+                                    logger.warning("expired_file_delete_failed", upload_id=upload_id, error=str(e))
+                        
+                        # Remove from DB
+                        expired_ids = [row["id"] for row in rows]
+                        await conn.execute(
+                            "DELETE FROM document_uploads WHERE id = ANY($1)",
+                            expired_ids
+                        )
+                        logger.info("expired_db_records_deleted", count=len(expired_ids))
+        except asyncio.CancelledError:
+            logger.info("cleanup_job_cancelled")
+            break
+        except Exception as e:
+            logger.error("cleanup_job_error", error=str(e))
+        
+        # Run every 1 hour
+        await asyncio.sleep(3600)
+
+_cleanup_task = None
+
+def start_cleanup_job(db_manager: DatabaseManager):
+    """Starts the background cleanup job."""
+    global _cleanup_task
+    if _cleanup_task is None:
+        _cleanup_task = asyncio.create_task(_cleanup_expired_uploads(db_manager))
+        logger.info("cleanup_job_started")
+
+def stop_cleanup_job():
+    """Stops the background cleanup job."""
+    global _cleanup_task
+    if _cleanup_task is not None:
+        _cleanup_task.cancel()
+        _cleanup_task = None
+        logger.info("cleanup_job_stopped")

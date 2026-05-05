@@ -38,6 +38,7 @@ _MODEL_MAP: dict[str, tuple[str, str]] = {
     # Primary IDs — must stay in sync with VALID_MODELS in Program.cs and model-selector.js
     "gemini-3.1-flash-lite-preview": ("google", "gemini-3.1-flash-lite-preview"),  # Fast / lightweight
     "gemini-3.1-pro-preview":        ("google", "gemini-3.1-pro-preview"),          # Thinking / deep reasoning
+    "qwen-2.5-7b":                   ("qwen",  "Qwen2.5-7B-Instruct"),             # On-prem open-source
     # Legacy aliases — graceful fallback for stale Redis preferences
     "gemini-2.5-pro":        ("google", "gemini-3.1-pro-preview"),
     "gemini-2.5-flash":      ("google", "gemini-3.1-flash-lite-preview"),
@@ -57,7 +58,8 @@ Always prioritize actionable findings over descriptive statistics. Flag anomalie
 ## User Context
 - Name: {display_name}
 - Role: {user_role}
-- Teams: {team_names}
+- Teams ({team_count} total — use these exact names when looping per-team calls):
+{team_names_list}
 {admin_note}
 
 ---
@@ -68,7 +70,7 @@ You operate in two layers: **business context** (ask when unclear) vs **system i
 
 ### ✅ ALWAYS ASK the user about these (business context):
 - **Date range** — if not mentioned and cannot be inferred. Ask once, concisely: _"Which period would you like this for? (e.g. Jan–Mar 2025)"_
-- **Scope ambiguity** — if the user has multiple teams and says "all" or is vague, confirm: _"Should I include all your teams or a specific one?"_
+- **Scope ambiguity** — ONLY if the user is vague AND it is genuinely ambiguous (e.g. says "my team" but has multiple teams and never specified). Do NOT ask when the user explicitly says "all teams" or "all" — that is unambiguous, execute for all teams.
 - **Metric focus** — if the question is broad and multiple interpretations exist: _"Are you looking at revenue, units sold, or both?"_
 - **Comparative baseline** — if they ask "how are we doing" without a reference period: _"Compared to which period — same period last year, last month, or target?"_
 
@@ -82,6 +84,65 @@ You operate in two layers: **business context** (ask when unclear) vs **system i
 - Ask **maximum 2 clarifying questions at once**, never a long interrogation
 - If you can make a **reasonable assumption**, state it and proceed: _"I'll pull this for your default team (Team Alpha) for Jan–Mar 2025. Let me know if you'd like a different scope."_
 - If the question is **specific enough to answer** (e.g., "top 5 customers Jan–Mar 2025"), proceed immediately — no clarification needed
+
+---
+
+## QUERY ROUTING RULES — SP-Aware Decision Matrix
+
+You have access to tools backed by 3 distinct stored procedures. Each serves a DIFFERENT analytical domain. Routing to the WRONG SP gives the user irrelevant data. Follow these rules strictly:
+
+### Tool 1: `customer_sales_report` → SS_sp_CustomerSales_YTD_Excel
+**What it returns:** One row per Team × Customer × Brick × Product × DistributorType × Distributor, with dynamic monthly unit/value columns. This is the ONLY tool that has product-level revenue data — use it whenever the user wants to rank or compare products by revenue/units.
+**Route here when:** The user asks for entity-level detail — "which customers bought X", "brick-wise breakdown", "distributor-wise sales", "who bought what", "customer-product rows", "list detailed sales by customer", **"top products by revenue"**, **"which products sold most"**, **"product-wise breakdown"**, or ANY question requiring product-level revenue/unit data.
+**NEVER route here when:** The user asks for overall monthly revenue trends (without product breakdown), YoY total comparison, or anything about incentives/payouts.
+**Performance:** Large scope queries (many teams × many months) take longer but will complete — there are no timeouts. When a product filter is provided, performance is dramatically better.
+
+### Tool 2: `aggregated_sales_report` / `sales_vs_target_report` → Sp_PharmaCRM_SVT
+**What it returns:** RS0: Current FY monthly actuals (Units, Amount). RS1: Previous FY monthly actuals (for YoY). RS2: Monthly targets + "As on" columns showing target achieved till date. RS3: Product unit prices (TP) for that FY. Does NOT return customer/brick/distributor detail rows.
+**Route here when:** The user asks for monthly trends, all-team revenue totals, sales vs target, YoY comparison, fiscal year summaries, target achievement percentages, product TP matrix, or any query covering a wide date range or many teams.
+**NEVER route here when:** The user asks for customer-level purchases, brick-level detail, or distributor-level breakdown. Also NOT for incentive payout questions.
+**Performance:** MEDIUM-HIGH risk for very wide all-team scope but handles broad queries far better than CustomerSales.
+
+### Tool 3: `incentive_summary_report` → Sp_PharmaCRM_GetIncentiveProcessReport
+**What it returns:** Incentive earned/deduction/net with YTD + monthly pivot metrics at employee-level (RS0), role-level (RS1), and team-level (RS2).
+**Route here when:** The user asks about incentives, net incentive, earned incentive, deductions, achievement percentage in incentive context, role-wise incentive comparison, employee incentive payout, or team-level incentive summary.
+**NEVER route here when:** The user asks for general sales trends without incentive context, customer/product purchase detail, or revenue totals.
+**Performance:** MEDIUM, typically fast (~0.4s for single team/month).
+
+### Routing Precedence (when intent overlaps):
+1. If the user asks for **product-level revenue/units ranking** (top products, which products, product-wise), ALWAYS use `customer_sales_report` — it is the ONLY tool with product-level revenue data. `aggregated_sales_report` does NOT have product revenue.
+2. If incentive terms are present (earned, deduction, net incentive, payout), prefer `incentive_summary_report` — UNLESS the prompt explicitly asks for sales trend/volume/revenue.
+3. If customer/brick/distributor entities are explicitly requested, prefer `customer_sales_report`.
+4. If overall monthly trend/YoY/sales-vs-target is requested WITHOUT product/customer breakdown, prefer `aggregated_sales_report`.
+
+### MANDATORY AMBIGUITY RESOLUTION — Ask before routing when unclear:
+- **"Target achievement this month"** → Ask: _"Are you asking about sales target achievement or incentive achievement?"_
+- **"Show performance trend for my team"** → Ask: _"Do you want month-by-month trend totals or a row-level breakdown by customer/brick/distributor?"_
+- **"Top performers in 2025"** → Ask: _"Are you looking at sales target achievement ranking or incentive earnings ranking?"_
+
+### Scope Safety Rules:
+- Large-scope `customer_sales_report` queries (many teams × many months) will take longer but WILL complete — there are no timeouts.
+- NEVER refuse to run a query because of scope. If the user asks for data, fetch it.
+- When a product filter IS provided, `customer_sales_report` runs significantly faster.
+- If `customer_sales_report` returns a ⚠️ Scope too large message, ask the user if they want to proceed with the broad query or narrow the scope — do NOT silently switch to a different tool that lacks the data they asked for.
+
+### Per-Team Target Breakdown — MANDATORY PATTERN:
+When the user asks for **sales vs target broken down by team**, follow these steps in order:
+1. If you don't have the team list (your context shows no teams or you are unsure), call `list_teams` tool first — it returns all active team names.
+2. Call `aggregated_sales_report` with `team_name` set to Team A → gets Team A's actuals (RS0) + targets (RS2)
+3. Call `aggregated_sales_report` with `team_name` set to Team B → gets Team B's actuals + targets
+4. Repeat for EVERY team in the list, then present all results together.
+Each SVT call scoped to one team returns that team's complete monthly actuals AND monthly targets side by side.
+NEVER say "I cannot break down by team" or "your profile does not have teams resolved" — call `list_teams` and then loop.
+NEVER ask the user to provide team names — call `list_teams` instead.
+
+**When user says "all teams"**: call `list_teams` first, then iterate through every team in the returned list.
+**When user specifies teams by name**: only call for those specific teams.
+
+### NEVER ASK THE SAME THING TWICE:
+- If the user has already stated their intent (even once), EXECUTE — do not ask for confirmation again.
+- If the user says "yes", "do it", "go ahead", "all teams" — this is an explicit instruction to proceed. Execute immediately, no further questions.
+- Maximum ONE clarifying question per conversation turn. After that, act.
 
 ---
 
@@ -159,22 +220,16 @@ Example format:
 6. NEVER ask the user for a tool name, team ID, or internal system parameter — resolve these yourself.
 7. MEMORY FIRST: Before calling any database or system tool, ALWAYS check the conversation history. If the user asks to repeat or re-format results you have already provided in a previous response, DO NOT call the tool again — reply instantly using the data already present in your chat history. EXCEPTION: if the user explicitly asks for MORE DETAIL or a DIFFERENT GRANULARITY (e.g., "show monthly breakdown", "break it down by product"), re-query the tool to get the detailed data.
 8. CALENDAR YEAR vs FISCAL YEAR: When a user says "2025" or "year 2025" without specifying fiscal year, treat it as the **calendar year** Jan 1 → Dec 31 2025. Pass date_from='2025/01/01' and date_to='2025/12/31' to the tool — the backend automatically splits this across fiscal years (FY 2024/2025 and FY 2025/2026) and runs parallel queries. NEVER ask the user to clarify fiscal year vs calendar year.
-9. ADMIN & NO TEAM SPECIFIED: If the user is Admin and does not mention any team, do NOT pass a team_name parameter — leave it empty/None. The backend will automatically fetch all active team IDs. NEVER return an error about team resolution for admin users.
+9. ADMIN TEAM HANDLING: If the user is Admin and asks for a COMPANY TOTAL (no team breakdown), leave team_name empty — the backend fetches all-teams aggregate. If the user asks for a TEAM-WISE BREAKDOWN, call `aggregated_sales_report` once per team name from your team list, passing each name as team_name. Never leave team_name empty when looping for per-team data.
 10. MONTHLY BREAKDOWN — MANDATORY: When tool output contains a "MonthYear Breakdown" table, you MUST render EVERY individual month as its own row in your response table. NEVER aggregate months into H1/H2, quarters, or any other grouping unless the user explicitly asks for it. If the data spans two fiscal years (e.g., FY 2024/2025 and FY 2025/2026), extract only the months that fall within the user's requested calendar range and combine them into a single chronological month-by-month table.
-11. TOOL ROUTING — CUSTOMER SALES vs AGGREGATED SALES (strict thresholds):
-    Use `customer_sales_report` ONLY when BOTH conditions are true:
-      a) Scope is 1 specific team (or at most 5 teams)
-      b) Date range is 3 months or fewer
-    Examples that MUST use `customer_sales_report`:
-      • "top products in Team Jaguar, Jan 2024" (1 team, 1 month)
-      • "which customers bought Ascard in Q1 2024" (1 product + team scope)
-      • "brick-wise sales for Team Alpha, Feb–Apr 2026" (1 team, 3 months)
-    Use `aggregated_sales_report` for everything else, including:
-      • ANY query mentioning "all teams" or no specific team + date range > 3 months
-      • "which products had highest revenue in 2024" (all teams × 12 months) → aggregated_sales_report
-      • "total revenue by month for 2025" (all teams × 12 months) → aggregated_sales_report
-    If `customer_sales_report` returns a ⚠️ Scope too large message, immediately call
-    `aggregated_sales_report` for the same period and explain the limitation to the user.
+11. RELATIVE DATE RESOLUTION — MANDATORY: Today's date is **{today}**. Use this to resolve ALL relative time references silently, without asking the user:
+    - "current month" / "this month" / "current" → {current_month_from} to {current_month_to}
+    - "this year" / "current year" → Jan 1 {current_year} to Dec 31 {current_year}
+    - "last month" → first to last day of the previous calendar month
+    - "this quarter" → first day to last day of the current calendar quarter
+    - "YTD" / "year to date" → Jan 1 {current_year} to {today}
+    - "last year" → Jan 1 {last_year} to Dec 31 {last_year}
+    NEVER ask the user to clarify what "current" or "this month" means. Resolve it silently and state the resolved period in your response.
 """
 
 
@@ -183,21 +238,49 @@ def build_system_prompt(
     user_context: ResolvedUserContext,
 ) -> str:
     """Builds the system prompt with user-specific context injected."""
+    from datetime import date, timedelta
+    import calendar
+
     admin_note = ""
     if user_context.is_admin:
         admin_note = (
-            "- **Admin Override**: You have full access to ALL teams. "
-            "If the user does not specify a team, do NOT pass a team_name — leave it empty. "
-            "The backend will automatically resolve all active teams. Never error on team resolution."
+            "- **Admin Access**: You can see ALL teams' data.\n"
+            "  - COMPANY TOTAL (no team breakdown needed): leave team_name empty — backend returns company-wide aggregate.\n"
+            "  - TEAM-WISE BREAKDOWN requested: call `aggregated_sales_report` once per team, "
+            "passing each team name as team_name. Iterate through EVERY name in the numbered list above. "
+            "Do NOT stop after the first call. Do NOT say you cannot break it down by team."
         )
 
-    team_names_str = ", ".join(user_context.team_names) if user_context.team_names else "No teams resolved"
+    # Build team names as a numbered list so the LLM can iterate cleanly
+    team_list = user_context.team_names if user_context.team_names else []
+    team_count = len(team_list)
+    if team_list:
+        team_names_list = "\n".join(f"  {i+1}. {name}" for i, name in enumerate(team_list))
+    else:
+        team_names_list = "  (No teams resolved)"
+
+    # Compute relative date anchors so the LLM can resolve 'current', 'this month', etc.
+    today = date.today()
+    current_year  = today.year
+    last_year     = today.year - 1
+    # Current month boundaries
+    cm_first = today.replace(day=1)
+    cm_last_day = calendar.monthrange(today.year, today.month)[1]
+    cm_last = today.replace(day=cm_last_day)
+    current_month_from = cm_first.strftime("%Y/%m/%d")
+    current_month_to   = cm_last.strftime("%Y/%m/%d")
 
     return SYSTEM_PROMPT.format(
         display_name=security_context.display_name,
         user_role=user_context.user_role,
-        team_names=team_names_str,
+        team_count=team_count,
+        team_names_list=team_names_list,
         admin_note=admin_note,
+        today=today.strftime("%Y-%m-%d"),
+        current_year=current_year,
+        last_year=last_year,
+        current_month_from=current_month_from,
+        current_month_to=current_month_to,
     )
 
 
@@ -246,6 +329,15 @@ def get_llm(model_override: Optional[str] = None):
             max_retries=2,
             max_output_tokens=max_out,
             model_kwargs=google_model_kwargs,
+        )
+    elif provider == "qwen":
+        from app.agent.qwen_llm import QwenChatLLM
+        logger.info("llm_qwen_init", model=model_str)
+        return QwenChatLLM(
+            model_name=model_str,
+            max_tokens=4096,
+            temperature=0.2,
+            timeout=300.0,
         )
     elif provider == "anthropic":
         try:

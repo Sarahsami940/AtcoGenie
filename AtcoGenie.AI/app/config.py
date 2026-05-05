@@ -96,6 +96,8 @@ class Settings(BaseSettings):
             f"PWD={{{self.pharma_db_password}}};"
             "Encrypt=no;"
             "TrustServerCertificate=yes;"
+            "Connection Timeout=30;"   # login timeout only (30s)
+            "CommandTimeout=0;"        # query execution: 0 = unlimited
         )
 
     @property

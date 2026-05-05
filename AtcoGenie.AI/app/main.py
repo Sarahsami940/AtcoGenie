@@ -77,8 +77,11 @@ async def lifespan(app: FastAPI):
     app.state.tracer = tracer
 
     # 4. Initialize upload metadata table (once at startup, not per-request)
-    from app.api.upload import init_metadata_table
+    from app.api.upload import init_metadata_table, start_cleanup_job, stop_cleanup_job
     await init_metadata_table(db_manager)
+
+    # 5. Start background task for expiring Parquet files
+    start_cleanup_job(db_manager)
 
     logger.info("atcogenie_ai_ready", status="all_services_initialized")
 
@@ -86,6 +89,10 @@ async def lifespan(app: FastAPI):
 
     # --- SHUTDOWN ---
     logger.info("atcogenie_ai_shutdown", status="graceful")
+
+    # Stop cleanup job
+    if "stop_cleanup_job" in locals():
+        stop_cleanup_job()
 
     # Close DB pools
     if hasattr(app.state, "db_manager"):

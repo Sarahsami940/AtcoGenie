@@ -204,6 +204,7 @@ app.MapGet("/api/schema", async (AtcoGenie.Server.Application.Services.ISchemaSe
 var VALID_MODELS = new HashSet<string> {
     "gemini-3.1-flash-lite-preview", // Fast / lightweight (default)
     "gemini-3.1-pro-preview",        // Thinking / deep reasoning
+    "qwen-2.5-7b",                   // On-prem open-source Qwen 2.5-7B
 };
 const string DEFAULT_MODEL = "gemini-3.1-flash-lite-preview";
 
@@ -430,11 +431,12 @@ app.MapPost("/api/query", async (
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Query proxy failed for {User}: {Error}", username, ex.Message);
+        logger.LogError(ex, "Query proxy failed for {User}: [{Type}] {Error}", username, ex.GetType().Name, ex.Message);
         if (!httpContext.Response.HasStarted)
         {
             httpContext.Response.ContentType = "text/event-stream";
-            await httpContext.Response.WriteAsync("data: {\"type\":\"error\", \"reply\":\"An unexpected proxy error occurred.\"}\n\n");
+            var _safeMsg = $"[{ex.GetType().Name}] {ex.Message.Replace("\"", "'")}";
+            await httpContext.Response.WriteAsync($"data: {{\"type\":\"error\", \"reply\":\"{_safeMsg}\"}}\n\n");
         }
         return Results.Empty;
     }
@@ -548,7 +550,7 @@ app.MapPost("/api/data/uploads", async (HttpContext httpContext,
 
     var client = httpClientFactory.CreateClient("AiEngine");
     client.BaseAddress = new Uri(configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000");
-    client.Timeout = TimeSpan.FromMinutes(2);
+    client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
 
     var content = new StreamContent(httpContext.Request.Body);
     content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(

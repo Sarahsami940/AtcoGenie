@@ -102,7 +102,8 @@ async def _get_active_datasets(user_id: str, session_id: str, db_manager: Databa
                     "The user has the following uploaded dataset(s) available for analysis:"
                     "\n" + "\n".join(datasets)
                     + "\n\nTo query them, use the `query_user_dataset` tool with the exact ID and a DuckDB SQL string."
-                    + " The table is always named `data` (e.g. `SELECT * FROM data LIMIT 10`)."
+                    + " The table is always named `data` (e.g. `SELECT * FROM data`)."
+                    + " You can use full DuckDB SQL including JOINs, GROUP BY, window functions, etc."
                 )
             return ""
     except Exception as e:
@@ -465,12 +466,12 @@ async def chat_stream(
                 or "timed out" in err_lower
                 or "deadlineexceeded" in err_lower
             ):
-                # DB query or LLM inference timeout
+                # DB query or LLM inference timeout (should be rare now — timeouts are unlimited)
                 err_reply = (
-                    "⏱️ This query took too long and timed out (>2 minutes).\n\n"
+                    "⏱️ This query took too long and was terminated by the database server.\n\n"
                     "**Try one of these to speed it up:**\n"
-                    "- Use a shorter date range (e.g. 1–2 months instead of a full year)\n"
                     "- Filter by a specific team or product\n"
+                    "- Use a shorter date range\n"
                     "- Ask for a summary by month instead of full detail"
                 )
             else:
@@ -496,12 +497,12 @@ async def chat_stream(
                     yield ": keepalive\n\n"
                     
                 elapsed = __import__("time").monotonic() - start_time
-                if elapsed >= 600 and not prompt_shown: # 10 mins
+                if elapsed >= 600 and not prompt_shown:  # 10 mins
                     prompt_shown = True
-                    timeout_msg = "⏳ This is taking longer than 10 mins. Would you like to proceed or stop and query with a shorter range or filter by team id?"
-                    # Send both a status message and a chunk so it physically appears in the chat window, rather than just the subtle spinner text
-                    yield f"data: {json.dumps({'type': 'status', 'message': timeout_msg})}\n\n"
-                    yield f"data: {json.dumps({'type': 'chunk', 'content': timeout_msg + '\n\n'})}\n\n"
+                    timeout_msg = "⏳ This is taking longer than 10 minutes. Would you like to **continue waiting** or **cancel the request**?\n\n*(The query is still running — click the stop button to cancel at any time.)*"
+                    # Send as a status ticker AND as a visible chat message so the user actually sees it
+                    yield f"data: {json.dumps({'type': 'status', 'message': '⏳ Still running (10 min+)...'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'reply': timeout_msg, 'user': {}})}\n\n"
                     
                 continue
 

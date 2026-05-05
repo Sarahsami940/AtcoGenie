@@ -1,4 +1,5 @@
 using System.DirectoryServices;
+using System.Runtime.Versioning;
 using Microsoft.EntityFrameworkCore;
 
 namespace AtcoGenie.Server.Services;
@@ -16,6 +17,7 @@ public class IdentitySyncService : BackgroundService
         _serviceProvider = serviceProvider;
     }
 
+    [SupportedOSPlatform("windows")]
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Identity Sync Service started.");
@@ -423,6 +425,7 @@ public class IdentitySyncService : BackgroundService
         return results;
     }
 
+    [SupportedOSPlatform("windows")]
     private List<AdUserInfo> FetchAdUsers()
     {
         var results = new List<AdUserInfo>();
@@ -457,7 +460,8 @@ public class IdentitySyncService : BackgroundService
         return results;
     }
 
-    private string? GetProperty(SearchResult result, string propName) => 
+    [SupportedOSPlatform("windows")]
+    private string? GetProperty(SearchResult result, string propName) =>
         result.Properties.Contains(propName) ? result.Properties[propName][0].ToString() : null;
 
     private bool SafeToBoolean(object? value)

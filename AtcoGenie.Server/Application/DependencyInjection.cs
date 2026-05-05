@@ -26,7 +26,7 @@ public static class DependencyInjection
         // Register HttpClient for Gemini API calls
         services.AddHttpClient<Services.IGeminiService, Services.GeminiService>(client =>
         {
-            client.Timeout = TimeSpan.FromMinutes(5); // Prevent timeouts for complex AI reasoning
+            client.Timeout = System.Threading.Timeout.InfiniteTimeSpan; // No hard timeout — long-running SP chains must complete
         });
         
         // Register PromptBuilder for building schema-aware prompts

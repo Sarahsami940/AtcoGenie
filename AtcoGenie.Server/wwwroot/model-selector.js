@@ -1,33 +1,38 @@
 /**
- * AtcoGenie Model Selector v3
+ * AtcoGenie Model Selector v6
  * ============================
- * Injects a self-contained, styled model-picker pill into the page.
- * Does NOT rely on the React bundle's internal dropdown DOM.
+ * Injects the model picker INTO the input bar (replaces the non-functional
+ * visual button already rendered by the SPA there), and removes the old
+ * fixed top-right pill.
  *
- * Supported model IDs (must stay in sync with Program.cs VALID_MODELS):
- *   gemini-2.5-pro        →  Gemini 2.5 Pro        (Thinking, deep reasoning)
- *   gemini-2.5-flash-lite →  Gemini 2.5 Flash Lite  (Fast, lightweight)
+ * Strategy:
+ *  1. Find the existing model-button the SPA renders in the toolbar row
+ *     (matches text like "Gemini … (Fast)" or "Gemini …").
+ *  2. If found → hide it and insert our live button in its place.
+ *  3. If not found → fall back to appending to the toolbar row.
  */
 (function () {
   "use strict";
 
   // ── Model registry ────────────────────────────────────────────────────────
   const MODELS = [
-    { id: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash Lite", sub: "Fast · Lightweight", icon: "⚡" },
-    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", sub: "Thinking · Deep Reasoning", icon: "🧠" },
+    { id: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash", sub: "Fast · Lightweight", icon: "⚡" },
+    { id: "gemini-3.1-pro-preview",        label: "Gemini 3.1 Pro",   sub: "Thinking · Deep Reasoning", icon: "🧠" },
+    { id: "qwen-2.5-7b",                   label: "Qwen 2.5 7B",     sub: "On-Prem · Open Source", icon: "🏠" },
   ];
   const DEFAULT_MODEL_ID = "gemini-3.1-flash-lite-preview";
 
   // ── State ─────────────────────────────────────────────────────────────────
-  let _currentModel = DEFAULT_MODEL_ID;
-  let _dropdownOpen = false;
+  let _currentModel  = DEFAULT_MODEL_ID;
+  let _dropdownOpen  = false;
+  let _injected      = false;
 
   // ── Persist / load preference ─────────────────────────────────────────────
   async function fetchPreference() {
     try {
       const res = await fetch("/api/preferences/model");
       if (res.ok) return (await res.json()).model || DEFAULT_MODEL_ID;
-    } catch (_) { }
+    } catch (_) {}
     return DEFAULT_MODEL_ID;
   }
 
@@ -37,9 +42,7 @@
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ model: modelId }),
     });
-    if (res.ok) {
-      console.debug("[AtcoGenie] ✅ Model saved:", modelId);
-    } else {
+    if (!res.ok) {
       const msg = `Server rejected model '${modelId}' (HTTP ${res.status})`;
       console.warn("[AtcoGenie] ⚠️", msg);
       throw new Error(msg);
@@ -56,82 +59,83 @@
         if (!body.model) {
           body.model = _currentModel;
           init = Object.assign({}, init, { body: JSON.stringify(body) });
-          console.debug("[AtcoGenie] 📤 Injected model:", _currentModel);
         }
-      } catch (_) { }
+      } catch (_) {}
     }
     return _origFetch(input, init);
   };
 
-  // ── Build injected UI ─────────────────────────────────────────────────────
-  function buildUI() {
-    // ── Styles ──────────────────────────────────────────────────────────────
+  // ── Styles ────────────────────────────────────────────────────────────────
+  function injectStyles() {
+    if (document.getElementById("ag-ms-style")) return;
     const style = document.createElement("style");
+    style.id = "ag-ms-style";
     style.textContent = `
+      /* === Wrapper sits inline in the toolbar === */
+      #ag-ms-wrap {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        flex-shrink: 0;
+      }
+
       /* === Pill button === */
       #ag-model-pill {
-        position: fixed;
-        top: 14px;
-        right: 18px;
-        z-index: 99999;
-        display: flex;
+        display: inline-flex;
         align-items: center;
-        gap: 7px;
-        padding: 6px 14px 6px 10px;
-        background: rgba(15, 17, 26, 0.72);
-        border: 1px solid rgba(255, 255, 255, 0.13);
+        gap: 5px;
+        padding: 4px 10px 4px 8px;
+        background: rgba(99,102,241,0.12);
+        border: 1px solid rgba(99,102,241,0.35);
         border-radius: 999px;
         cursor: pointer;
-        color: #cbd5e1;
+        color: #1e293b;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        font-size: 13px;
-        font-weight: 500;
+        font-size: 12.5px;
+        font-weight: 600;
         letter-spacing: 0.01em;
-        backdrop-filter: blur(10px) saturate(140%);
-        -webkit-backdrop-filter: blur(10px) saturate(140%);
-        box-shadow: 0 2px 16px rgba(0,0,0,0.35);
-        transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+        transition: background 0.18s, border-color 0.18s, color 0.18s;
         user-select: none;
         white-space: nowrap;
+        line-height: 1.4;
       }
       #ag-model-pill:hover {
-        background: rgba(30, 36, 55, 0.88);
-        border-color: rgba(99, 102, 241, 0.45);
-        box-shadow: 0 2px 20px rgba(99, 102, 241, 0.2);
-        color: #e2e8f0;
+        background: rgba(99,102,241,0.22);
+        border-color: rgba(99,102,241,0.55);
+        color: #0f172a;
       }
-      #ag-model-pill .ag-pill-icon { font-size: 15px; line-height: 1; }
-      #ag-model-pill .ag-pill-label { color: #e2e8f0; }
+      #ag-model-pill .ag-pill-icon  { font-size: 13px; line-height: 1; }
+      #ag-model-pill .ag-pill-label { color: #1e293b; font-weight: 600; }
       #ag-model-pill .ag-pill-caret {
-        color: #64748b;
-        font-size: 9px;
-        margin-left: 1px;
-        transition: transform 0.2s ease;
+        color: #4f46e5;
+        font-size: 8px;
+        margin-left: 2px;
+        transition: transform 0.18s ease;
         display: inline-block;
       }
       #ag-model-pill.ag-open .ag-pill-caret { transform: rotate(180deg); }
 
-      /* === Dropdown panel === */
+      /* === Dropdown panel — opens upward === */
       #ag-model-dropdown {
-        position: fixed;
-        top: 54px;
-        right: 18px;
-        z-index: 99998;
+        position: absolute;
+        bottom: calc(100% + 8px);
+        left: 0;
+        z-index: 99999;
         background: #141824;
-        border: 1px solid rgba(255,255,255,0.1);
+        border: 1px solid rgba(255,255,255,0.10);
         border-radius: 14px;
         padding: 6px;
-        min-width: 228px;
-        box-shadow: 0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(99,102,241,0.08);
+        min-width: 230px;
+        box-shadow: 0 -8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(99,102,241,0.08);
         display: none;
       }
       #ag-model-dropdown.ag-visible {
         display: block;
-        animation: ag-slide-in 0.17s cubic-bezier(0.16, 1, 0.3, 1);
+        animation: ag-slide-up 0.17s cubic-bezier(0.16, 1, 0.3, 1);
       }
-      @keyframes ag-slide-in {
-        from { opacity: 0; transform: translateY(-8px) scale(0.97); }
-        to   { opacity: 1; transform: translateY(0)   scale(1);     }
+      @keyframes ag-slide-up {
+        from { opacity: 0; transform: translateY(8px) scale(0.97); }
+        to   { opacity: 1; transform: translateY(0)  scale(1);     }
       }
 
       /* === Individual option === */
@@ -144,7 +148,7 @@
         cursor: pointer;
         transition: background 0.15s;
       }
-      .ag-option:hover { background: rgba(255,255,255,0.06); }
+      .ag-option:hover   { background: rgba(255,255,255,0.06); }
       .ag-option.ag-active { background: rgba(99,102,241,0.14); }
 
       .ag-opt-icon {
@@ -180,7 +184,6 @@
       }
       .ag-option.ag-active .ag-check { opacity: 1; }
 
-      /* === Divider label === */
       .ag-dropdown-header {
         padding: 6px 12px 4px;
         font-size: 10px;
@@ -192,20 +195,23 @@
       }
     `;
     document.head.appendChild(style);
+  }
 
-    // ── Pill ────────────────────────────────────────────────────────────────
+  // ── Build the pill + dropdown ─────────────────────────────────────────────
+  function buildPill() {
+    const wrap = document.createElement("div");
+    wrap.id = "ag-ms-wrap";
+
     const pill = document.createElement("button");
     pill.id = "ag-model-pill";
     pill.setAttribute("aria-haspopup", "listbox");
     pill.setAttribute("aria-expanded", "false");
     pill.innerHTML = `
       <span class="ag-pill-icon">⚡</span>
-      <span class="ag-pill-label">Gemini 2.5 Flash</span>
+      <span class="ag-pill-label">Gemini 3.1 Flash</span>
       <span class="ag-pill-caret">▼</span>
     `;
-    document.body.appendChild(pill);
 
-    // ── Dropdown ─────────────────────────────────────────────────────────────
     const dropdown = document.createElement("div");
     dropdown.id = "ag-model-dropdown";
     dropdown.setAttribute("role", "listbox");
@@ -232,75 +238,80 @@
       opt.addEventListener("click", function (e) {
         e.stopPropagation();
         e.preventDefault();
-
-        if (m.id === _currentModel) { closeDropdown(); return; } // no-op if already active
-
+        if (m.id === _currentModel) { closeDropdown(); return; }
         const prevModel = _currentModel;
-
-        // Optimistic update — flip UI immediately, don’t wait for HTTP
-        _currentModel          = m.id;
+        _currentModel = m.id;
         window.__atcoGenieModel = m.id;
         refreshUI();
         closeDropdown();
-
-        // Persist in background; revert if server rejects
         savePreference(m.id).catch(function () {
-          _currentModel          = prevModel;
+          _currentModel = prevModel;
           window.__atcoGenieModel = prevModel;
           refreshUI();
-          console.warn("[AtcoGenie] ↩ Reverted to:", prevModel);
         });
       });
       dropdown.appendChild(opt);
     });
 
-    document.body.appendChild(dropdown);
-
-    // ── Events ──────────────────────────────────────────────────────────────
     pill.addEventListener("click", function (e) {
       e.stopPropagation();
       _dropdownOpen ? closeDropdown() : openDropdown();
     });
-    // Use capture phase so our handler wins over React’s own document listeners
-    document.addEventListener("click", function (e) {
-      const dd = document.getElementById("ag-model-dropdown");
-      const pill = document.getElementById("ag-model-pill");
-      if (dd && !dd.contains(e.target) && pill && !pill.contains(e.target)) {
-        closeDropdown();
-      }
-    }, true); // capture: true
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") closeDropdown();
-    });
 
+    wrap.appendChild(pill);
+    wrap.appendChild(dropdown);
+    return wrap;
+  }
+
+  // ── Find the SPA's existing model button row and inject ───────────────────
+  function tryInject() {
+    if (_injected) return true;
+
+    // The SPA renders a toolbar row containing the file-attachment button (+)
+    // and a model name button like "Gemini 3 Pro (Fast) ▾".
+    // We look for a button whose text contains "Gemini" or "gemini".
+    const spaBtn = Array.from(document.querySelectorAll("button")).find(b =>
+      /gemini|qwen/i.test(b.textContent) && b.closest("form,footer,[class*='input'],[class*='toolbar']")
+    );
+
+    if (!spaBtn) return false;
+
+    // Hide the SPA's non-functional button
+    spaBtn.style.display = "none";
+
+    injectStyles();
+    const wrap = buildPill();
+    spaBtn.parentElement.insertBefore(wrap, spaBtn);
+    _injected = true;
+    refreshUI();
+    console.log("[AtcoGenie] ✅ Model selector v6 injected into input bar.");
+    return true;
   }
 
   // ── UI helpers ─────────────────────────────────────────────────────────────
   function openDropdown() {
     _dropdownOpen = true;
-    const dd = document.getElementById("ag-model-dropdown");
+    const dd   = document.getElementById("ag-model-dropdown");
     const pill = document.getElementById("ag-model-pill");
-    if (dd) { dd.classList.add("ag-visible"); dd.removeAttribute("hidden"); }
+    if (dd)   { dd.classList.add("ag-visible"); }
     if (pill) { pill.classList.add("ag-open"); pill.setAttribute("aria-expanded", "true"); }
   }
 
   function closeDropdown() {
     _dropdownOpen = false;
-    const dd = document.getElementById("ag-model-dropdown");
+    const dd   = document.getElementById("ag-model-dropdown");
     const pill = document.getElementById("ag-model-pill");
-    if (dd) { dd.classList.remove("ag-visible"); }
+    if (dd)   { dd.classList.remove("ag-visible"); }
     if (pill) { pill.classList.remove("ag-open"); pill.setAttribute("aria-expanded", "false"); }
   }
 
   function refreshUI() {
-    const model = MODELS.find(function (m) { return m.id === _currentModel; }) || MODELS[0];
-
-    const pill = document.getElementById("ag-model-pill");
+    const model = MODELS.find(m => m.id === _currentModel) || MODELS[0];
+    const pill  = document.getElementById("ag-model-pill");
     if (pill) {
-      pill.querySelector(".ag-pill-icon").textContent = model.icon;
+      pill.querySelector(".ag-pill-icon").textContent  = model.icon;
       pill.querySelector(".ag-pill-label").textContent = model.label;
     }
-
     document.querySelectorAll(".ag-option").forEach(function (opt) {
       const active = opt.getAttribute("data-model-id") === _currentModel;
       opt.classList.toggle("ag-active", active);
@@ -308,14 +319,32 @@
     });
   }
 
+  // Close on outside click
+  document.addEventListener("click", function (e) {
+    const dd   = document.getElementById("ag-model-dropdown");
+    const pill = document.getElementById("ag-model-pill");
+    if (dd && !dd.contains(e.target) && pill && !pill.contains(e.target)) {
+      closeDropdown();
+    }
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeDropdown();
+  });
+
   // ── Boot ──────────────────────────────────────────────────────────────────
   function boot() {
     fetchPreference().then(function (model) {
       _currentModel = model;
       window.__atcoGenieModel = model;
-      buildUI();
-      refreshUI();
-      console.log("[AtcoGenie] 🚀 Model selector v4 ready. Active model:", model);
+
+      // Try immediately, then poll until the SPA renders the input bar
+      if (!tryInject()) {
+        let n = 0;
+        const t = setInterval(() => {
+          n++;
+          if (tryInject() || n > 100) clearInterval(t);
+        }, 300);
+      }
     });
   }
 

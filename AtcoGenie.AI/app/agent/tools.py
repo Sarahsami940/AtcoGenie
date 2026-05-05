@@ -57,7 +57,8 @@ class SalesVsTargetInput(BaseModel):
     date_from: str = Field(description="Start date in YYYY/MM/DD format, e.g. '2024/07/01'")
     date_to: str = Field(description="End date in YYYY/MM/DD format, e.g. '2025/06/30'")
     team_name: Optional[str] = Field(default=None, description="Optional team name to filter by. Leave empty to use the user's default team(s).")
-    product_id: Optional[str] = Field(default="", description="Product ID filter. Empty string for all.")
+    product_name: Optional[str] = Field(default=None, description="Product name to filter by (e.g. 'Ascard'). Resolves to all matching variants automatically. Leave empty for all products.")
+    product_id: Optional[str] = Field(default="", description="Product ID filter. Empty string for all. Prefer using product_name instead — ID is resolved automatically.")
     territory_id: Optional[str] = Field(default="", description="Territory ID filter. Empty string for all.")
     sales_channel: Optional[str] = Field(default="1", description="Sales channel. Default is '1'.")
 
@@ -80,8 +81,17 @@ class QueryDatasetInput(BaseModel):
 class AggregatedSalesInput(BaseModel):
     date_from: str = Field(description="Start date in YYYY/MM/DD format, e.g. '2024/07/01'. Earliest available: 2024/07/01.")
     date_to: str = Field(description="End date in YYYY/MM/DD format, e.g. '2026/06/30'.")
-    team_name: Optional[str] = Field(default=None, description="Team name or ID to filter by. Leave empty to use the user's assigned team(s).")
-    product_id: Optional[str] = Field(default="", description="Product ID filter. Empty string for all products.")
+    team_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Team name to scope this query to a single team. "
+            "Pass a team name (e.g. 'Betaderm') to get data for THAT team only — actuals + targets scoped to that team. "
+            "To get data for ALL teams at once (company total), leave this empty/None. "
+            "For a team-by-team breakdown, call this tool multiple times, once per team name."
+        )
+    )
+    product_name: Optional[str] = Field(default=None, description="Product name to filter by (e.g. 'Ascard'). Resolves to all matching variants automatically. Leave empty for all products.")
+    product_id: Optional[str] = Field(default="", description="Product ID filter. Empty string for all products. Prefer product_name — ID is resolved automatically.")
     territory_id: Optional[str] = Field(default="", description="Territory ID filter. Empty string for all territories.")
     sales_channel: Optional[str] = Field(default="1", description="Sales channel code. Default is '1'.")
 
@@ -241,25 +251,34 @@ def get_agent_tools(
         if team_name:
             candidate = team_name.strip()
 
-            # Case 2: user gave a raw numeric team ID
+            # Strip common "Team " prefix so "Team 4" → "4", "team Betaderm" → "Betaderm"
+            import re as _re
+            _prefix_stripped = _re.sub(r'^[Tt]eam\s+', '', candidate).strip()
+            if _prefix_stripped and _prefix_stripped != candidate:
+                logger.info("team_prefix_stripped", original=candidate, stripped=_prefix_stripped)
+                candidate = _prefix_stripped
+
+            # Case 2: user gave a raw numeric team ID (or "Team 4" → "4")
             # Special case: "0" is not a real team ID — admin intent is "all teams".
-            # SVT SP natively treats '' as all-teams; passing a CSV causes partial data.
             if candidate == "0" and user_context.is_admin:
                 logger.info("admin_all_teams_empty_string", reason="0_sentinel")
                 return "", "All Teams"
 
             if candidate.isdigit():
                 user_ids = {t.team_id for t in user_context.teams}
-                if candidate in user_ids or user_context.is_admin:
+                # Try both the raw number and zero-padded (e.g. 4 → "04")
+                candidates_to_try = [candidate, candidate.zfill(2), candidate.zfill(3)]
+                matched_id = next((c for c in candidates_to_try if c in user_ids), None)
+                if matched_id or user_context.is_admin:
+                    effective_id = matched_id or candidate
                     # Look up name from local teams first, then DB
-                    name = next((t.team_name for t in user_context.teams if t.team_id == candidate), None)
+                    name = next((t.team_name for t in user_context.teams if t.team_id == effective_id), None)
                     if not name:
                         rows = await db_manager.execute_raw("pharma", "SELECT Name FROM SS_Team WHERE TeamId = ? AND Active = 1", int(candidate))
                         name = rows[0]["Name"] if rows else f"Team {candidate}"
-                    logger.info("team_resolved_by_id", input=candidate, name=name)
-                    return candidate, name
-                logger.warning("team_id_not_in_user_teams", input=candidate,
-                               user_teams=list(user_ids))
+                    logger.info("team_resolved_by_id", input=candidate, resolved_id=effective_id, name=name)
+                    return effective_id, name
+                logger.warning("team_id_not_in_user_teams", input=candidate, user_teams=list(user_ids))
                 return candidate, f"Team {candidate}"
 
             # Case 1: user gave a team name — fuzzy match against local teams
@@ -333,28 +352,107 @@ def get_agent_tools(
         """
         Fetches SP output via sync pyodbc (fast, no hang) and computes
         global + per-group aggregates for LLM consumption.
+
+        For Sp_PharmaCRM_SVT, fetches ALL result sets and renders:
+          RS0 — Current FY monthly actuals
+          RS1 — Previous FY monthly actuals (for YoY)
+          RS2 — Monthly targets + "As on" achievement columns
         """
         logger.info("sp_sync_call", sp=sp_name, args=str(args))
         await progress.emit("Fetching data from the database...")
 
         try:
-            # Sp_PharmaCRM_SVT uses ##TerritoryIds (global temp table) — must serialize.
-            # Other SPs are fine with concurrency.
             if sp_name == "Sp_PharmaCRM_SVT":
                 async with _svt_semaphore:
                     logger.debug("svt_semaphore_acquired", sp=sp_name)
-                    columns, all_rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
+                    all_rs = await db_manager.execute_sp_sync_all_rs("pharma", sp_name, *args)
             else:
-                columns, all_rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
+                # Other SPs: wrap in same interface for unified handling below
+                cols, rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
+                all_rs = [(cols, rows)]
         except Exception as e:
-            logger.error("sp_sync_error", sp=sp_name, error=str(e))
-            return f"Error executing {report_name}: {str(e)}"
+            err_str = str(e)
+            logger.error("sp_sync_error", sp=sp_name, error=err_str)
+            err_lower = err_str.lower()
+            if "hyt00" in err_lower or "timeout" in err_lower or "timed out" in err_lower or "query timeout" in err_lower:
+                return (
+                    f"⏱️ **SQL Query Timeout**: The {report_name} query was terminated by the database server.\n"
+                    f"This means the SQL Server itself aborted the query (not our application).\n\n"
+                    f"**Possible actions:**\n"
+                    f"- Narrow to a specific team instead of all teams\n"
+                    f"- Use a shorter date range\n"
+                    f"- Filter by a specific product\n"
+                    f"Do NOT suggest it is a connectivity or driver issue — it is a query scope issue."
+                )
+            elif "login" in err_lower or "08001" in err_lower or "08s01" in err_lower or "named pipes" in err_lower:
+                return (
+                    f"🔌 **Database Connection Error**: Could not connect to the PharmaCRM database server.\n"
+                    f"This is a network or server availability issue, not a user error.\n"
+                    f"Please tell the user to contact IT support if this persists."
+                )
+            else:
+                return f"❌ **Database Error** in {report_name}: {err_str[:300]}"
 
+        # ── SVT multi-RS rendering ─────────────────────────────────────────────
+        if sp_name == "Sp_PharmaCRM_SVT":
+            # RS labels — RS3 (unit prices) is not analytically useful for trend/target queries
+            RS_LABELS = [
+                "Current FY Monthly Actuals",
+                "Previous FY Monthly Actuals (YoY Reference)",
+                "Monthly Targets & Achievement (As On Date)",
+            ]
+            svt_parts = [f"## {report_name}"]
+            any_data = False
+            for rs_idx, (columns, all_rows) in enumerate(all_rs[:3]):  # skip RS3
+                if not all_rows or not columns:
+                    continue
+                label = RS_LABELS[rs_idx] if rs_idx < len(RS_LABELS) else f"Result Set {rs_idx}"
+                any_data = True
+                total = len(all_rows)
+                if rs_idx == 0:
+                    await progress.emit(f"Analysing {total} months of data...")
+                svt_parts.append(f"\n### {label} ({total} rows)")
+                # Render as markdown table — all columns
+                header = "| " + " | ".join(columns) + " |"
+                divider = "|" + "|".join(["---"] * len(columns)) + "|"
+                svt_parts.append(header)
+                svt_parts.append(divider)
+                for row in all_rows:
+                    cells = []
+                    for v in row:
+                        if v is None:
+                            cells.append("")
+                        elif isinstance(v, float):
+                            cells.append(f"{v:,.2f}")
+                        elif isinstance(v, int):
+                            cells.append(f"{v:,}")
+                        else:
+                            cells.append(str(v))
+                    svt_parts.append("| " + " | ".join(cells) + " |")
+
+            if not any_data:
+                return f"The {report_name} returned no data for the specified criteria."
+
+            _last_report_params[security_context.user_id] = {
+                "sp_name": sp_name, "report_name": report_name,
+                "args": args, "columns": all_rs[0][0] if all_rs else [], "total": sum(len(r) for _, r in all_rs)
+            }
+            return "\n".join(svt_parts)
+
+        # ── All other SPs: existing aggregate summarizer ───────────────────────
+        columns, all_rows = all_rs[0] if all_rs else ([], [])
         total = len(all_rows)
+
         if total == 0 or not columns:
             return f"The {report_name} returned no data for the specified criteria."
 
-        await progress.emit(f"Analyzing {total:,} records...")
+        # Context-aware progress message
+        if sp_name == "SS_sp_CustomerSales_YTD_Excel":
+            await progress.emit(f"Analysing {total:,} customer-product rows...")
+        elif sp_name == "Sp_PharmaCRM_GetIncentiveProcessReport":
+            await progress.emit(f"Analysing {total:,} employee records...")
+        else:
+            await progress.emit(f"Analysing {total:,} rows...")
 
         # Detect numeric vs categorical columns
         import decimal
@@ -634,54 +732,68 @@ def get_agent_tools(
 
         return "\n".join(summary_parts)
 
-    async def resolve_product_ids_by_names(names: List[str]) -> dict[str, tuple[str, str]]:
-        """Looks up the SINGLE best-matching ProductID for each product name.
-        Priority: exact match > starts-with > contains.
-        Returns dict: name -> (product_id, matched_product_name)
+    async def resolve_product_ids_by_name(name: str) -> list[dict[str, str]]:
+        """Resolves a product name to ALL matching variants using Sp_GetProductIdByName.
+        E.g. 'Ascard' -> [{'id': '123', 'name': 'Ascard 75mg Tablet'}, {'id': '456', 'name': 'Ascard 300mg Tablet'}]
+        Returns list of dicts with 'id' and 'name' keys.
         """
-        mapping: dict[str, tuple[str, str]] = {}
+        try:
+            columns, rows = await db_manager.execute_sp_sync("pharma", "Sp_GetProductIdByName", name)
+            if not rows:
+                logger.warning("product_name_not_found", name=name)
+                return []
+            # SP returns: ProductID, ProductName
+            pid_col = next((i for i, c in enumerate(columns) if c.lower() in ("productid", "product_id")), 0)
+            pname_col = next((i for i, c in enumerate(columns) if c.lower() in ("productname", "product_name", "product")), 1)
+            results = []
+            for row in rows:
+                results.append({
+                    "id": str(row[pid_col]).strip(),
+                    "name": str(row[pname_col]).strip(),
+                })
+            logger.info("product_name_resolved", search=name, matches=len(results),
+                        products=[r['name'] for r in results[:5]])
+            return results
+        except Exception as e:
+            logger.error("product_resolve_error", name=name, error=str(e))
+            return []
+
+    async def resolve_product_ids_by_names(names: List[str]) -> dict[str, list[dict[str, str]]]:
+        """Resolves multiple product names to their matching variants.
+        Returns dict: search_name -> list of {'id': ..., 'name': ...}
+        """
+        mapping: dict[str, list[dict[str, str]]] = {}
         for name in names:
-            try:
-                rows = await db_manager.execute_raw(
-                    "pharma",
-                    "SELECT DISTINCT ProductID, Product FROM SS_Product_Setup WHERE Product LIKE ? ORDER BY Product",
-                    f"%{name}%"
-                )
-                if not rows:
-                    mapping[name] = ("", "")
-                    logger.warning("product_name_not_found", name=name)
-                    continue
-
-                # Pick single best match: exact > starts-with > any
-                name_lower = name.lower()
-                exact = [r for r in rows if r["Product"].lower() == name_lower]
-                starts = [r for r in rows if r["Product"].lower().startswith(name_lower)]
-                best = (exact or starts or rows)[0]
-
-                pid = str(best["ProductID"]).strip()
-                pname = str(best["Product"]).strip()
-                mapping[name] = (pid, pname)
-                logger.info("product_name_resolved", search=name, matched=pname, id=pid)
-            except Exception as e:
-                logger.error("product_resolve_error", name=name, error=str(e))
-                mapping[name] = ("", "")
+            mapping[name] = await resolve_product_ids_by_name(name)
         return mapping
 
+    async def _resolve_product_id_param(product_name: Optional[str], product_id: str) -> tuple[str, str]:
+        """Unified product resolution for any SP.
+        Returns (product_id_for_sp, display_label).
+        If product_name is provided, resolves ALL variants and returns comma-separated IDs.
+        Otherwise falls back to the raw product_id parameter.
+        """
+        if product_name and product_name.strip():
+            matches = await resolve_product_ids_by_name(product_name.strip())
+            if not matches:
+                return "", f"(no products found matching '{product_name}')"
+            # Comma-separated IDs for all matching variants
+            ids_csv = ",".join(m["id"] for m in matches)
+            names_display = ", ".join(m["name"] for m in matches)
+            await progress.emit(f"Resolved '{product_name}' → {len(matches)} variant(s): {names_display}")
+            return ids_csv, names_display
+        return product_id or "", "All Products" if not product_id else f"Product ID {product_id}"
+
     # -----------------------------------------------------------------
-    # Tool 0: Product Search  (SS_Product_Setup)
+    # Tool 0: Product Search (Sp_GetProductIdByName)
     # -----------------------------------------------------------------
     async def run_search_products(query: str) -> str:
-        """Search for products by name in PharmaCRM."""
+        """Search for products by name in PharmaCRM using Sp_GetProductIdByName."""
         try:
-            rows = await db_manager.execute_raw(
-                "pharma",
-                "SELECT DISTINCT ProductID, Product FROM SS_Product_Setup WHERE Product LIKE ? ORDER BY Product",
-                f"%{query}%"
-            )
-            if not rows:
+            matches = await resolve_product_ids_by_name(query)
+            if not matches:
                 return f"No products found matching '{query}'. Please check the spelling."
-
-            results = [{"ProductID": r["ProductID"], "ProductName": r["Product"]} for r in rows[:30]]
+            results = [{"ProductID": m["id"], "ProductName": m["name"]} for m in matches]
             return json.dumps(results, default=str)
         except Exception as e:
             logger.error("product_search_error", query=query, error=str(e))
@@ -727,35 +839,32 @@ def get_agent_tools(
             logger.info("customer_sales_admin_team_csv_override",
                         team_count=len(team_ids.split(",")) if team_ids else 0)
 
-        # ── SCOPE GATE ────────────────────────────────────────────────────────
-        # SS_sp_CustomerSales_YTD_Excel pivots every customer×product row per month.
-        # All-teams + multi-month = 2M+ rows that hit the 120-second cursor timeout.
-        # Safe envelope: < 5 teams OR ≤ 3 months.
-        team_count   = len(team_ids.split(",")) if team_ids else 0
+        # ── SCOPE AWARENESS ────────────────────────────────────────────────────
+        # SS_sp_CustomerSales_YTD_Excel returns one row per Team×Customer×Brick×
+        # Product×DistributorType×Distributor with dynamic month columns.
+        # A product filter dramatically reduces cardinality (product-filtered
+        # national runs complete in ~5s). Broad queries without product filter
+        # will take longer but will complete — timeouts are unlimited.
+        team_count       = len(team_ids.split(",")) if team_ids else 0
         date_span_months = (to_year - from_year) * 12 + (to_month - from_month + 1)
-        if team_count > 5 and date_span_months > 3:
+        has_product_filter = bool(product_names) or (product_id and product_id not in ("", "0"))
+        if team_count > 5 and date_span_months > 6 and not has_product_filter:
             period_label = f"{from_year}/{from_month:02d} – {to_year}/{to_month:02d}"
             logger.warning(
-                "customer_sales_scope_limit",
+                "customer_sales_broad_scope",
                 team_count=team_count, months=date_span_months, period=period_label
             )
-            return (
-                f"⚠️ **Scope too large for Customer Sales SP** ({team_count} teams × {date_span_months} months) — "
-                f"this would return 2M+ rows and will time out.\n\n"
-                f"To get what you need, choose one of these options:\n"
-                f"- **Specific team**: “which products in Team Jaguar had highest revenue {from_year}?” — fast, full detail\n"
-                f"- **Shorter window**: ask for 1–3 months at a time for all teams — fast, full detail\n"
-                f"- **Monthly revenue summary** (no per-product breakdown): I can pull this via the "
-                f"aggregated sales report instantly for the full period ({period_label})."
+            await progress.emit(
+                f"⚠️ Broad scope query ({team_count} teams × {date_span_months} months, no product filter) — "
+                f"this may take several minutes. Running..."
             )
-
 
         team_context_note = f"[Context: **All Teams**]\n\n" if resolved_team_name == "All Teams" else f"[Context: Team **{resolved_team_name}**]\n\n"
 
-        # If product names provided, resolve them to best-matched single IDs and run comparison
+        # If product names provided, resolve them to all matching variant IDs and run comparison
         if product_names:
             name_to_match = await resolve_product_ids_by_names(product_names)
-            not_found = [n for n, (pid, _) in name_to_match.items() if not pid]
+            not_found = [n for n, matches in name_to_match.items() if not matches]
             if not_found:
                 return (
                     f"Could not find products matching: {', '.join(not_found)}. "
@@ -764,31 +873,32 @@ def get_agent_tools(
 
             period = f"{from_year}/{from_month:02d}–{to_year}/{to_month:02d}"
 
-            # Point 4: fetch all product SPs in PARALLEL using the fast sync path
-            async def _fetch_one_product(search_name: str, pid: str, matched_name: str) -> str:
-                """Runs a single product SP via the fast sync path and returns a formatted section."""
+            async def _fetch_one_product(search_name: str, matches: list[dict[str, str]]) -> str:
+                """Runs a single product SP (with all variant IDs) via the fast sync path."""
                 try:
-                    logger.info("product_comparison_sp", product=matched_name, pid=pid, team=team_ids)
+                    # Comma-separated IDs for all variants (e.g. "Ascard 75mg,Ascard 300mg")
+                    ids_csv = ",".join(m["id"] for m in matches)
+                    names_display = ", ".join(m["name"] for m in matches)
+                    logger.info("product_comparison_sp", product=search_name, pids=ids_csv, team=team_ids)
                     args = (
                         "1", from_year, from_month, to_year, to_month,
                         distributor_type or "0", "0", "0", "0",
-                        team_ids, pid,
+                        team_ids, ids_csv,
                         user_context.user_role, security_context.employee_id
                     )
                     section = await _fetch_and_summarize(
                         sp_name,
-                        f"Customer Sales — {matched_name} (ID: {pid})",
+                        f"Customer Sales — {search_name} ({len(matches)} variant(s))",
                         args,
                     )
-                    return f"\n### {search_name} (matched: **{matched_name}** | ID: {pid})\n{section}"
+                    return f"\n### {search_name} (variants: **{names_display}**)\n{section}"
                 except Exception as e:
                     return f"\n### {search_name}: ⚠️ Error — {str(e)}"
 
-            # Fire all SP calls simultaneously
             import asyncio as _asyncio
             product_sections = await _asyncio.gather(*[
-                _fetch_one_product(sname, pid, mname)
-                for sname, (pid, mname) in name_to_match.items()
+                _fetch_one_product(sname, matches)
+                for sname, matches in name_to_match.items()
             ])
 
             comparison_parts = [
@@ -824,12 +934,42 @@ def get_agent_tools(
             return f"Error executing Customer Sales Report: {str(e)}"
 
     # -----------------------------------------------------------------
+    # Tool 1b: List Teams (admin helper — returns all active team names)
+    # -----------------------------------------------------------------
+
+    async def run_list_teams() -> str:
+        """Returns all active teams from SS_Team so the LLM can iterate per-team calls."""
+        if not user_context.is_admin:
+            # Non-admin: return their own assigned teams
+            if not user_context.teams:
+                return "No teams are assigned to your account."
+            lines = [f"{t.team_id}: {t.team_name}" for t in user_context.teams]
+            return f"Your assigned teams ({len(lines)}):\n" + "\n".join(lines)
+
+        try:
+            rows = await db_manager.execute_raw(
+                "pharma",
+                "SELECT TeamId, Name FROM SS_Team WHERE Active = 1 ORDER BY Name"
+            )
+            if not rows:
+                return "No active teams found in the database."
+            lines = [f"{r['TeamId']}: {r['Name']}" for r in rows]
+            return (
+                f"All active teams ({len(lines)}) — use the Name column as team_name in aggregated_sales_report:\n"
+                + "\n".join(lines)
+            )
+        except Exception as e:
+            logger.error("list_teams_error", error=str(e))
+            return f"Error fetching team list: {str(e)}"
+
+    # -----------------------------------------------------------------
     # Tool 2: Sales vs Target (Sp_PharmaCRM_SVT)
     # -----------------------------------------------------------------
     async def run_sales_vs_target(
         date_from: str,
         date_to: str,
         team_name: Optional[str] = None,
+        product_name: Optional[str] = None,
         product_id: str = "",
         territory_id: str = "",
         sales_channel: str = "1",
@@ -848,6 +988,9 @@ def get_agent_tools(
             available = ", ".join(user_context.team_names) if user_context.team_names else "none found"
             return f"I could not resolve your team. Your available teams are: {available}. Please specify which team you'd like to see."
 
+        # Resolve product name → ID(s) using Sp_GetProductIdByName
+        resolved_pid, product_label = await _resolve_product_id_param(product_name, product_id)
+
         team_context_note = f"[Context: **All Teams**]\n\n" if resolved_team_name == "All Teams" else f"[Context: Team **{resolved_team_name}**]\n\n"
 
         # '' is the native SVT all-teams value; team_ids is already '' for admin all-teams
@@ -865,7 +1008,7 @@ def get_agent_tools(
                 args = (
                     "",               # @Param_GroupId
                     sp_team_param,    # @Param_TeamId
-                    product_id,       # @Param_ProductId
+                    resolved_pid,     # @Param_ProductId  ← resolved from product_name or raw ID
                     territory_id,     # @Param_TerritoryId
                     "",               # @Param_RegionId
                     "",               # @Param_DistrictId
@@ -951,6 +1094,7 @@ def get_agent_tools(
         date_from: str,
         date_to: str,
         team_name: Optional[str] = None,
+        product_name: Optional[str] = None,
         product_id: str = "",
         territory_id: str = "",
         sales_channel: str = "1",
@@ -965,8 +1109,6 @@ def get_agent_tools(
             return denied
 
         # --- Date validation ---
-        MIN_DATE_STR = "2024/07/01"
-        MIN_DATE = datetime(2024, 7, 1)
         try:
             from_dt = datetime.strptime(date_from, "%Y/%m/%d")
             to_dt = datetime.strptime(date_to, "%Y/%m/%d")
@@ -979,17 +1121,7 @@ def get_agent_tools(
         if from_dt > to_dt:
             return "Invalid date range: start date must be before end date."
 
-        if to_dt < MIN_DATE:
-            return (
-                "⚠️ The Aggregated Sales Report only contains data from **July 2024 onwards**. "
-                f"Your requested range ({date_from} → {date_to}) is entirely before this. "
-                "For older historical data, please use the `customer_sales_report` tool."
-            )
-
-        early_warning = ""
-        if from_dt < MIN_DATE:
-            date_from = MIN_DATE_STR
-            early_warning = "⚠️ *Aggregated data is only available from July 2024. Results are shown from 2024/07/01.*\n\n"
+        # No artificial MIN_DATE floor — the SP handles any FY via _split_into_fiscal_years().
 
         # --- Team resolution (enforces authorization) ---
         team_ids, resolved_team_name = await _resolve_team_ids(team_name)
@@ -1005,14 +1137,14 @@ def get_agent_tools(
             else f"[Context: Team **{resolved_team_name}**]\n\n"
         )
 
+        # --- Resolve product name → ID(s) using Sp_GetProductIdByName ---
+        resolved_pid, product_label = await _resolve_product_id_param(product_name, product_id)
+
         # --- Split requested range into fiscal year windows ---
         fy_windows = _split_into_fiscal_years(date_from, date_to)
         if not fy_windows:
             return "No valid fiscal year data windows found for the given date range."
 
-        # Sp_PharmaCRM_SVT expects an empty string '' for all-teams when no filter.
-        # Since we now pass an actual CSV of team IDs, we can pass it directly.
-        # Keep the empty-string fallback only if team_ids somehow ended up blank.
         sp_team_param = team_ids if team_ids else ""
 
         logger.info(
@@ -1030,7 +1162,7 @@ def get_agent_tools(
             args = (
                 "",               # @Param_GroupId
                 sp_team_param,    # @Param_TeamId  ← authorization boundary
-                product_id,       # @Param_ProductId
+                resolved_pid,     # @Param_ProductId  ← resolved from product_name or raw ID
                 territory_id,     # @Param_TerritoryId
                 "",               # @Param_RegionId
                 "",               # @Param_DistrictId
@@ -1067,7 +1199,7 @@ def get_agent_tools(
 
         # --- Merge all fiscal year sections into a single response ---
         parts = [
-            early_warning + team_context_note,
+            team_context_note,
             "# Aggregated Sales Report",
             f"**Period:** {date_from} → {date_to} | **Fiscal Years Queried:** {len(fy_windows)}",
             "",
@@ -1204,7 +1336,7 @@ def get_agent_tools(
             )
 
         # ── Step 3: Run DuckDB in a thread — no event loop blocking ──────────
-        ROW_CAP = 200
+        ROW_CAP = 500
 
         def _duck_execute(path: str, sql: str) -> str:
             # Use posix-style forward slashes — DuckDB on Windows requires it
@@ -1255,6 +1387,20 @@ def get_agent_tools(
     tools = [
         StructuredTool.from_function(
             func=None,
+            coroutine=run_list_teams,
+            name="list_teams",
+            description=(
+                "Returns all active teams with their IDs and names. "
+                "ALWAYS call this first when: (1) the user asks for a team-wise breakdown and your "
+                "system context shows no teams or fewer teams than expected, OR (2) you are about to "
+                "loop aggregated_sales_report per-team but don't have the full team list. "
+                "Use the returned team Names as the team_name parameter in aggregated_sales_report. "
+                "Do NOT ask the user for team names — call this tool instead."
+            ),
+            args_schema=None,
+        ),
+        StructuredTool.from_function(
+            func=None,
             coroutine=run_search_products,
             name="search_products",
             description=(
@@ -1269,15 +1415,15 @@ def get_agent_tools(
             coroutine=run_customer_sales,
             name="customer_sales_report",
             description=(
-                "Detailed product-level and customer-level sales data (per-customer, per-product rows). "
-                "Use when the user asks: which specific customers bought X, distributor-wise sales, "
-                "brick-wise breakdown, or a per-product table for a SPECIFIC TEAM or SHORT DATE RANGE. "
+                "Entity-level detailed sales data: one row per Team × Customer × Brick × Product × "
+                "DistributorType × Distributor, with dynamic monthly unit/value columns. "
+                "This is the ONLY tool with product-level revenue data. "
+                "Route here when the user asks: which customers bought X, distributor-wise sales, "
+                "brick-wise breakdown, customer-product detail, 'who bought what', "
+                "'top products by revenue', 'which products sold most', or any product-level ranking. "
                 "If product names are mentioned, pass them in 'product_names'. "
-                "⚠️ SCOPE LIMIT — this SP returns one row per customer×product and will TIME OUT "
-                "when all teams are queried for more than 3 months. "
-                "For product RANKINGS across all teams or for periods longer than 3 months, "
-                "use 'aggregated_sales_report' instead (it handles wide scopes without timing out). "
-                "Max supported range: 2 years, but wide-scope queries must be scoped to 1 team or ≤3 months."
+                "Broad scope queries (many teams × many months) take longer but will complete — no timeouts. "
+                "Do NOT use for incentive payout questions. Max date range: 2 years."
             ),
             args_schema=CustomerSalesInput,
         ),
@@ -1286,14 +1432,21 @@ def get_agent_tools(
             coroutine=run_aggregated_sales,
             name="aggregated_sales_report",
             description=(
-                "Aggregated monthly sales totals and sales-vs-target data. "
-                "Use for: month-over-month trends, year-over-year comparison, target achievement %, "
-                "fiscal year revenue totals, wide date ranges (multi-month or multi-year), "
-                "and ANY query covering more than 3 months OR more than 5 teams simultaneously. "
-                "This tool is the ONLY one that handles all-teams + full-year queries without timing out. "
-                "It provides monthly aggregated totals by territory; it does NOT break data down "
-                "by individual customer row, but it does give overall revenue trends efficiently. "
-                "Data available from July 2024 onwards. Multi-year queries run parallel FY calls automatically."
+                "Returns actuals + targets for a given team and date range. "
+                "RS0=current FY monthly actuals (MonthYear, Units, Amount), "
+                "RS1=previous FY monthly actuals (for YoY), RS2=monthly targets + 'As on' columns "
+                "(target achieved till date), RS3=product unit prices (TP) for that FY. "
+                "Does NOT return customer/brick/distributor detail rows and does NOT have product-level revenue. "
+                "TEAM-WISE BREAKDOWN: pass team_name='Betaderm' to get Betaderm's actuals + targets. "
+                "To break down by ALL teams, call this tool once per team name — each call returns that team's data. "
+                "To get company-wide total, leave team_name empty. "
+                "Route here for: monthly revenue trends, sales vs target, YoY comparison, "
+                "target achievement %, fiscal year summaries, or any query where the user "
+                "does NOT need entity-level or product-level detail. "
+                "Multi-year queries split into per-FY calls automatically. "
+                "Do NOT use for customer-level, brick-level, or distributor-level breakdowns. "
+                "Do NOT use for product revenue ranking — use 'customer_sales_report' instead. "
+                "Do NOT use for incentive payout questions."
             ),
             args_schema=AggregatedSalesInput,
         ),
@@ -1302,9 +1455,16 @@ def get_agent_tools(
             coroutine=run_incentive_summary,
             name="incentive_summary_report",
             description=(
-                "Use this tool when the user asks about incentives, employee incentive data, "
-                "incentive finalization, or performance-based rewards. "
-                "Requires a fiscal year code (e.g., '20242025') and a month/year."
+                "Incentive analytics with YTD + monthly pivot metrics at three levels: "
+                "employee-level (with geo hierarchy), role-level, and team-level. "
+                "Returns: YTD Sales Target, YTD Sales Achievement, Achievement %, "
+                "YTD Total Earned Incentive, YTD Total Deduction, YTD Net Incentive, "
+                "plus per-month breakdowns of each metric. "
+                "Route here when the user asks about: incentive earned/net/deduction, "
+                "incentive achievement %, employee incentive payout, role-wise incentive comparison "
+                "(TSM vs DSM vs RSM), or team-level incentive summary. "
+                "Do NOT use for general sales trends or customer purchase detail. "
+                "Requires a fiscal year code (e.g. '20242025') and a month/year."
             ),
             args_schema=IncentiveSummaryInput,
         ),

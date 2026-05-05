@@ -165,7 +165,7 @@ public class GenieQueryService : IGenieQueryService
             var aiEngineUrl = _configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000";
             var client = _httpClientFactory.CreateClient("AiEngine");
             client.BaseAddress = new Uri(aiEngineUrl);
-            client.Timeout = TimeSpan.FromMinutes(10); // Multi-product comparisons require multiple SP + LLM calls
+            client.Timeout = System.Threading.Timeout.InfiniteTimeSpan; // No hard timeout — SP chains with serialization can run long
 
             var payload = new
             {
