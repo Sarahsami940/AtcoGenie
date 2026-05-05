@@ -137,7 +137,10 @@
     sb.style.setProperty("background", SB_BG, "important");
     sb.style.setProperty("border-right", `1px solid ${SB_BORDER}`, "important");
     sb.style.setProperty("position", "relative", "important");
-    sb.style.setProperty("overflow", "hidden", "important");
+    // NOTE: Do NOT set overflow:hidden — it clips position:fixed dropdowns
+    // (the 3-dot menu). Blobs are clipped via their own container instead.
+    sb.style.setProperty("overflow-y", "auto", "important");
+    sb.style.setProperty("overflow-x", "hidden", "important");
 
     // Inject blobs into sidebar
     injectSidebarBlobs(sb);
@@ -699,30 +702,11 @@
       document.head.appendChild(style);
     }
 
-    // 2. Click-outside handler to close the 3-dot dropdown
-    //    The SPA already has a window click handler (A(null)), but our theme's
-    //    stopPropagation on sidebar hover listeners can prevent it from firing.
-    //    This handler observes the DOM for the dropdown and closes it when
-    //    clicking outside.
-    document.addEventListener("click", function (e) {
-      // Find any open dropdown inside sidebar (position:fixed with high z-index)
-      const dropdowns = document.querySelectorAll('[data-ag-sidebar] div[style*="position"]');
-      dropdowns.forEach(function (dd) {
-        const z = parseInt(dd.style.zIndex || window.getComputedStyle(dd).zIndex, 10);
-        if (z < 100) return; // not a popup
-        if (dd.contains(e.target)) return; // clicked inside
-        // Check if the click was on the 3-dot button itself (the ⋮ trigger)
-        const trigger = e.target.closest('button');
-        if (trigger) {
-          const txt = trigger.textContent?.trim() || "";
-          if (txt === "⋮" || txt === "…" || txt === "•••" || txt.length <= 1) return;
-        }
-        // Close by clicking the document body (triggers the SPA's A(null) handler)
-        dd.style.display = "none";
-        // Also hide after a frame so React state catches up
-        requestAnimationFrame(() => { dd.style.display = "none"; });
-      });
-    }, true); // capture phase to fire before stopPropagation
+    // NOTE: Removed custom capture-phase click handler.
+    // The SPA already has window.addEventListener('click', () => A(null))
+    // which closes the dropdown natively. Our handler was setting
+    // dd.style.display='none' BEFORE React could process button clicks,
+    // which is why Rename/Archive/Delete didn't work.
   }
 
   function boot() {
