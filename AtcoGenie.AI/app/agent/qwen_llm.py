@@ -14,10 +14,13 @@ Tool Calling Strategy:
 
 import json
 import re
-from typing import Any, List, Optional, Iterator
+from typing import Any, AsyncIterator, List, Optional, Iterator
 
 import httpx
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -41,6 +44,22 @@ _TOOL_CALL_RE = re.compile(
 
 # Default Qwen server URL (on-prem)
 QWEN_BASE_URL = "http://10.10.35.88:8005"
+
+# Errors that indicate the Qwen server closed the connection after finishing
+# generation — harmless, we already have all the tokens.
+_BENIGN_STREAM_ERRORS = (
+    "incomplete chunked read",
+    "peer closed connection",
+    "RemoteProtocolError",
+    "ReadError",
+    "IncompleteRead",
+)
+
+
+def _is_benign_stream_error(exc: Exception) -> bool:
+    """Check if a streaming exception is just the Qwen server closing early."""
+    msg = str(exc)
+    return any(pattern in msg for pattern in _BENIGN_STREAM_ERRORS)
 
 
 def _parse_tool_calls(text: str) -> list[dict]:
@@ -133,8 +152,28 @@ def _messages_to_qwen(messages: List[BaseMessage], tool_schemas: list[dict]) -> 
     return result
 
 
+def _build_payload(messages: list[dict], max_tokens: int, temperature: float, top_p: float) -> dict:
+    return {
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": max(temperature, 0.01),  # Qwen deadlocks on exactly 0
+        "top_p": top_p,
+    }
+
+
+def _text_to_ai_message(text: str, tool_schemas: list[dict]) -> AIMessage:
+    """Convert raw Qwen text to an AIMessage, parsing any tool calls."""
+    tool_calls = _parse_tool_calls(text) if tool_schemas else []
+    if tool_calls:
+        clean_text = _TOOL_CALL_RE.sub("", text).strip()
+        return AIMessage(content=clean_text, tool_calls=tool_calls)
+    return AIMessage(content=text)
+
+
 class QwenChatLLM(BaseChatModel):
-    """LangChain BaseChatModel that calls the on-prem Qwen 2.5-7B API."""
+    """LangChain BaseChatModel that calls the on-prem Qwen 2.5-7B API.
+    Implements both sync and async generation/streaming.
+    """
 
     model_name: str = "Qwen2.5-7B-Instruct"
     base_url: str = Field(default=QWEN_BASE_URL)
@@ -167,7 +206,8 @@ class QwenChatLLM(BaseChatModel):
         schemas = []
         for t in tools:
             if hasattr(t, "get_input_schema"):
-                schema = t.get_input_schema().schema() if hasattr(t.get_input_schema(), "schema") else {}
+                schema_obj = t.get_input_schema()
+                schema = schema_obj.schema() if hasattr(schema_obj, "schema") else {}
             else:
                 schema = {}
             schemas.append({
@@ -175,10 +215,11 @@ class QwenChatLLM(BaseChatModel):
                 "description": getattr(t, "description", ""),
                 "parameters": schema,
             })
-        # Create a copy with tools bound
         new_instance = self.model_copy()
         new_instance._tool_schemas = schemas
         return new_instance
+
+    # ── Sync methods (fallback) ──────────────────────────────────────────
 
     def _generate(
         self,
@@ -189,13 +230,7 @@ class QwenChatLLM(BaseChatModel):
     ) -> ChatResult:
         """Synchronous generation via POST /chat."""
         qwen_messages = _messages_to_qwen(messages, self._tool_schemas)
-
-        payload = {
-            "messages": qwen_messages,
-            "max_tokens": self.max_tokens,
-            "temperature": max(self.temperature, 0.01),  # Qwen deadlocks on exactly 0
-            "top_p": self.top_p,
-        }
+        payload = _build_payload(qwen_messages, self.max_tokens, self.temperature, self.top_p)
 
         try:
             resp = httpx.post(
@@ -204,8 +239,7 @@ class QwenChatLLM(BaseChatModel):
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            data = resp.json()
-            text = data.get("response", "")
+            text = resp.json().get("response", "")
         except httpx.HTTPStatusError as e:
             logger.error("qwen_api_error", status=e.response.status_code, body=e.response.text[:300])
             raise
@@ -213,20 +247,8 @@ class QwenChatLLM(BaseChatModel):
             logger.error("qwen_request_failed", error=str(e))
             raise
 
-        # Parse tool calls from output
-        tool_calls = _parse_tool_calls(text)
-        if tool_calls:
-            # Strip the tool_call tags from visible content
-            clean_text = _TOOL_CALL_RE.sub("", text).strip()
-            ai_msg = AIMessage(
-                content=clean_text,
-                tool_calls=tool_calls,
-            )
-        else:
-            ai_msg = AIMessage(content=text)
-
-        generation = ChatGeneration(message=ai_msg)
-        return ChatResult(generations=[generation])
+        ai_msg = _text_to_ai_message(text, self._tool_schemas)
+        return ChatResult(generations=[ChatGeneration(message=ai_msg)])
 
     def _stream(
         self,
@@ -235,17 +257,13 @@ class QwenChatLLM(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        """Streaming generation via POST /chat/stream (SSE)."""
+        """Streaming generation via POST /chat/stream (SSE) — sync version."""
         qwen_messages = _messages_to_qwen(messages, self._tool_schemas)
+        payload = _build_payload(qwen_messages, self.max_tokens, self.temperature, self.top_p)
 
-        payload = {
-            "messages": qwen_messages,
-            "max_tokens": self.max_tokens,
-            "temperature": max(self.temperature, 0.01),
-            "top_p": self.top_p,
-        }
+        full_text: list[str] = []
+        done_received = False
 
-        full_text = []
         try:
             with httpx.stream(
                 "POST",
@@ -266,31 +284,115 @@ class QwenChatLLM(BaseChatModel):
                     if "token" in event:
                         token = event["token"]
                         full_text.append(token)
-                        chunk = ChatGenerationChunk(
-                            message=AIMessageChunk(content=token)
-                        )
+                        chunk = ChatGenerationChunk(message=AIMessageChunk(content=token))
                         if run_manager:
                             run_manager.on_llm_new_token(token)
                         yield chunk
                     elif event.get("done"):
+                        done_received = True
                         break
                     elif "error" in event:
                         logger.error("qwen_stream_error", error=event["error"])
                         break
         except Exception as e:
-            logger.error("qwen_stream_failed", error=str(e))
+            if _is_benign_stream_error(e) and full_text:
+                logger.debug("qwen_stream_closed_benign", tokens=len(full_text))
+            else:
+                logger.error("qwen_stream_failed", error=str(e))
+                raise
+
+        # Check for tool calls in accumulated output
+        combined = "".join(full_text)
+        tool_calls = _parse_tool_calls(combined) if self._tool_schemas else []
+        if tool_calls:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="", tool_calls=tool_calls)
+            )
+
+    # ── Async methods (primary path — used by astream_events) ────────────
+
+    async def _agenerate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Async generation via POST /chat."""
+        qwen_messages = _messages_to_qwen(messages, self._tool_schemas)
+        payload = _build_payload(qwen_messages, self.max_tokens, self.temperature, self.top_p)
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(f"{self.base_url}/chat", json=payload)
+                resp.raise_for_status()
+                text = resp.json().get("response", "")
+        except httpx.HTTPStatusError as e:
+            logger.error("qwen_api_error", status=e.response.status_code, body=e.response.text[:300])
+            raise
+        except Exception as e:
+            logger.error("qwen_request_failed", error=str(e))
             raise
 
-        # After streaming, check if the full text contains tool calls
-        # If so, yield a final chunk with tool_calls metadata
+        ai_msg = _text_to_ai_message(text, self._tool_schemas)
+        return ChatResult(generations=[ChatGeneration(message=ai_msg)])
+
+    async def _astream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        """Async streaming via POST /chat/stream (SSE) — primary path for astream_events."""
+        qwen_messages = _messages_to_qwen(messages, self._tool_schemas)
+        payload = _build_payload(qwen_messages, self.max_tokens, self.temperature, self.top_p)
+
+        full_text: list[str] = []
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/stream",
+                    json=payload,
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        raw = line[len("data:"):].strip()
+                        try:
+                            event = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if "token" in event:
+                            token = event["token"]
+                            full_text.append(token)
+                            chunk = ChatGenerationChunk(
+                                message=AIMessageChunk(content=token)
+                            )
+                            if run_manager:
+                                await run_manager.on_llm_new_token(token)
+                            yield chunk
+                        elif event.get("done"):
+                            break
+                        elif "error" in event:
+                            logger.error("qwen_stream_error", error=event["error"])
+                            break
+        except Exception as e:
+            if _is_benign_stream_error(e) and full_text:
+                # Qwen server closed connection after sending all tokens — harmless
+                logger.debug("qwen_stream_closed_benign", tokens=len(full_text))
+            else:
+                logger.error("qwen_astream_failed", error=str(e))
+                raise
+
+        # Check for tool calls in accumulated output
         combined = "".join(full_text)
-        tool_calls = _parse_tool_calls(combined)
+        tool_calls = _parse_tool_calls(combined) if self._tool_schemas else []
         if tool_calls:
-            # Yield a final chunk that carries tool_calls
-            final_chunk = ChatGenerationChunk(
-                message=AIMessageChunk(
-                    content="",
-                    tool_calls=tool_calls,
-                )
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="", tool_calls=tool_calls)
             )
-            yield final_chunk
