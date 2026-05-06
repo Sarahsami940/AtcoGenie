@@ -368,30 +368,43 @@
     return (+m[1] + +m[2] + +m[3]) / 3 > 150;
   }
 
-  /* â”€â”€ 4. Main area gradient blobs (subtle on light) â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── 4. Main area gradient blobs ── */
+  /* Injected INSIDE the main content container (not body) so they
+     live within ChainLit's opaque wrapper stack and are actually visible.
+     Uses position:absolute relative to the container.                    */
   function injectMainBlobs() {
     if (document.getElementById("ag-main-blob-1")) return;
+
+    // Find the main content area — the scrollable chat column.
+    // ChainLit structure: body > div.flex.h-screen > div.flex-1 > main
+    const mainEl = document.querySelector("main");
+    if (!mainEl) return;  // retry via boot()
+
+    // The container that holds main — this is the flex-1 column
+    const container = mainEl.parentElement || mainEl;
+    container.style.setProperty("position", "relative", "important");
+    container.style.setProperty("overflow", "hidden", "important");
 
     const defs = [
       {
         id: "ag-main-blob-1",
-        css: `position:fixed;width:520px;height:520px;top:-100px;right:4%;border-radius:50%;
-              background:radial-gradient(ellipse at center,rgba(22,87,203,0.42) 0%,rgba(99,149,235,0.18) 55%,transparent 80%);
-              filter:blur(40px);pointer-events:none;z-index:0;
+        css: `position:absolute;width:560px;height:560px;top:-120px;right:-80px;border-radius:50%;
+              background:radial-gradient(ellipse at center,rgba(22,87,203,0.32) 0%,rgba(99,149,235,0.14) 55%,transparent 80%);
+              filter:blur(52px);pointer-events:none;z-index:0;
               animation:agMainB1 22s ease-in-out infinite alternate;`
       },
       {
         id: "ag-main-blob-2",
-        css: `position:fixed;width:400px;height:400px;bottom:60px;left:calc(280px + 8%);border-radius:50%;
-              background:radial-gradient(ellipse at center,rgba(22,87,203,0.38) 0%,rgba(96,165,250,0.16) 55%,transparent 80%);
-              filter:blur(45px);pointer-events:none;z-index:0;
+        css: `position:absolute;width:440px;height:440px;bottom:60px;left:-60px;border-radius:50%;
+              background:radial-gradient(ellipse at center,rgba(22,87,203,0.26) 0%,rgba(96,165,250,0.11) 55%,transparent 80%);
+              filter:blur(58px);pointer-events:none;z-index:0;
               animation:agMainB2 28s ease-in-out infinite alternate;animation-delay:-12s;`
       },
       {
         id: "ag-main-blob-3",
-        css: `position:fixed;width:300px;height:300px;top:38%;right:18%;border-radius:50%;
-              background:radial-gradient(ellipse at center,rgba(56,189,248,0.30) 0%,rgba(14,165,233,0.10) 60%,transparent 80%);
-              filter:blur(50px);pointer-events:none;z-index:0;
+        css: `position:absolute;width:340px;height:340px;top:38%;right:15%;border-radius:50%;
+              background:radial-gradient(ellipse at center,rgba(56,189,248,0.20) 0%,rgba(14,165,233,0.08) 60%,transparent 80%);
+              filter:blur(64px);pointer-events:none;z-index:0;
               animation:agMainB1 34s ease-in-out infinite alternate;animation-delay:-7s;`
       }
     ];
@@ -399,8 +412,20 @@
     defs.forEach(({ id, css }) => {
       const el = document.createElement("div");
       el.id = id;
+      el.className = "ag-main-blob";
       el.style.cssText = css;
-      document.body.appendChild(el);
+      container.appendChild(el);
+    });
+
+    // Ensure all real content inside container sits above blobs
+    Array.from(container.children).forEach(child => {
+      if (!child.classList.contains("ag-main-blob")) {
+        const pos = window.getComputedStyle(child).position;
+        if (pos === "static") {
+          child.style.setProperty("position", "relative", "important");
+        }
+        child.style.setProperty("z-index", "1", "important");
+      }
     });
 
     if (!document.getElementById("ag-main-kf")) {
@@ -426,7 +451,7 @@
     }
   }
 
-  /* â”€â”€ 5. Chat header â€” constrain width â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── 5. Chat header — constrain width ── */
   function constrainChatHeader() {
     // Look for the top bar (sticky header) in main content
     const candidates = Array.from(document.querySelectorAll(
@@ -471,7 +496,10 @@
   }
 
   /* â”€â”€ 7. User message bubble fixer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  let _fixingBubbles = false;
   function fixUserBubbles() {
+    if (_fixingBubbles) return;
+    _fixingBubbles = true;
     const chat = document.querySelector("main") || document.body;
 
     chat.querySelectorAll('[class*="justify-end"]').forEach(row => {
@@ -517,6 +545,7 @@
         c.style.setProperty("background", "transparent", "important");
       });
     });
+    _fixingBubbles = false;
   }
 
   /* â”€â”€ 7b. Chat header â€” narrow + centered â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -554,6 +583,7 @@
   /* â”€â”€ 8. Message entrance animation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   function observeMessages() {
     fixUserBubbles(); // Run on existing messages
+    let _msgDebounce = null;
     new MutationObserver(mutations => {
       for (const m of mutations) {
         for (const n of m.addedNodes) {
@@ -563,8 +593,9 @@
           }
         }
       }
-      // Re-check user bubbles after any DOM change
-      fixUserBubbles();
+      // Debounce: SSE streaming causes rapid DOM updates
+      if (_msgDebounce) clearTimeout(_msgDebounce);
+      _msgDebounce = setTimeout(fixUserBubbles, 200);
       // NOTE: do NOT call hideInputChips here â€” it runs at document level and can hide the sidebar
     }).observe(document.body, { childList: true, subtree: true });
 
@@ -597,116 +628,135 @@
     });
   }
 
-  /* ── Fix 3-dot dropdown menu: opaque background + close on outside click ── */
+  /* ── Fix 3-dot dropdown: portal to body for correct positioning ── */
   function fixDropdownMenus() {
-    // 1. Inject CSS to force opaque background on floating dropdown menus
     if (!document.getElementById("ag-dropdown-fix")) {
       const style = document.createElement("style");
       style.id = "ag-dropdown-fix";
       style.textContent = `
-        /* Force opaque bg on the sidebar 3-dot dropdown menu */
-        [data-ag-sidebar] div[style*="position: fixed"][style*="z-index"],
-        [data-ag-sidebar] div[style*="position:fixed"],
-        div[class*="z-[200]"],
-        div[class*="shadow-xl"][class*="rounded-lg"][class*="bg-white"] {
-          background-color: #1e293b !important;
+        /* Hide original misplaced dropdown (we portal a clone to body) */
+        [data-ag-sidebar] div[class*="z-[200]"][class*="shadow"] {
+          visibility: hidden !important;
+          pointer-events: none !important;
+          width: 0 !important; height: 0 !important;
+          overflow: hidden !important;
+        }
+        .ag-dropdown-portal {
+          position: fixed !important; z-index: 99999 !important;
           background: #1e293b !important;
-          border-color: rgba(255,255,255,0.12) !important;
+          border: 1px solid rgba(255,255,255,0.12) !important;
+          border-radius: 8px !important;
+          box-shadow: 0 8px 30px rgba(0,0,0,0.4) !important;
+          padding: 4px 0 !important; min-width: 120px !important;
         }
-        /* Menu item text should be light */
-        div[class*="z-[200]"] button,
-        div[style*="position: fixed"][style*="z-index"] button {
-          color: #e2e8f0 !important;
+        .ag-dropdown-portal button {
+          color: #e2e8f0 !important; background: transparent !important;
+          display: flex !important; width: 100% !important;
+          text-align: left !important; padding: 6px 12px !important;
+          font-size: 12px !important; align-items: center !important;
+          gap: 8px !important; cursor: pointer !important;
+          border: none !important; outline: none !important;
         }
-        div[class*="z-[200]"] button:hover,
-        div[style*="position: fixed"][style*="z-index"] button:hover {
-          background-color: rgba(255,255,255,0.1) !important;
+        .ag-dropdown-portal button:hover { background: rgba(255,255,255,0.1) !important; }
+        .ag-dropdown-portal button:last-child { color: #fca5a5 !important; }
+        .ag-dropdown-portal button:last-child:hover { background: rgba(220,38,38,0.15) !important; }
+        .ag-dropdown-portal svg {
+          color: #94a3b8 !important; stroke: #94a3b8 !important;
+          width: 12px !important; height: 12px !important; flex-shrink: 0 !important;
         }
-        /* Red hover for delete */
-        div[class*="z-[200]"] button[class*="hover:bg-red"],
-        div[style*="position: fixed"][style*="z-index"] button[class*="hover:bg-red"] {
-          color: #fca5a5 !important;
-        }
-        div[class*="z-[200]"] button[class*="hover:bg-red"]:hover,
-        div[style*="position: fixed"][style*="z-index"] button[class*="hover:bg-red"]:hover {
-          background-color: rgba(220,38,38,0.15) !important;
-        }
-        /* SVG icons in menu */
-        div[class*="z-[200]"] svg,
-        div[style*="position: fixed"][style*="z-index"] svg {
-          color: #94a3b8 !important;
-          stroke: #94a3b8 !important;
-        }
+        .ag-dropdown-backdrop { position: fixed; inset: 0; z-index: 99998; background: transparent; }
 
-        /* ── 3-dot trigger button: force visible on parent hover ── */
-        /* The ⋮ button uses opacity-0 + group-hover:opacity-100 but our
-           inline color overrides make the SVG invisible even at opacity:1.
-           Fix: force the button visible on group hover and ensure SVG contrast. */
+        /* ── 3-dot trigger: visible on hover ── */
         .group:hover > div > button[class*="opacity-0"],
-        .group:hover button[class*="group-hover:opacity-100"],
-        [data-ag-sidebar] .group:hover button[class*="opacity-0"] {
-          opacity: 1 !important;
-        }
-        /* Ensure the dots SVG inside the trigger is always visible */
+        .group:hover button[class*="group-hover"],
+        [data-ag-sidebar] .group:hover button[class*="opacity-0"] { opacity: 1 !important; }
         [data-ag-sidebar] .group:hover button[class*="opacity-0"] svg,
         [data-ag-sidebar] .group:hover button[class*="opacity-0"] svg path {
-          stroke: rgba(255,255,255,0.7) !important;
-          color: rgba(255,255,255,0.7) !important;
+          stroke: rgba(255,255,255,0.7) !important; color: rgba(255,255,255,0.7) !important;
         }
         [data-ag-sidebar] .group:hover button[class*="opacity-0"]:hover {
-          background: rgba(255,255,255,0.15) !important;
-          border-radius: 6px !important;
+          background: rgba(255,255,255,0.15) !important; border-radius: 6px !important;
         }
         [data-ag-sidebar] .group:hover button[class*="opacity-0"]:hover svg,
         [data-ag-sidebar] .group:hover button[class*="opacity-0"]:hover svg path {
-          stroke: #ffffff !important;
-          color: #ffffff !important;
+          stroke: #fff !important; color: #fff !important;
         }
 
-        /* ── Sidebar chat list: spacing + readability ── */
-        /* Chat items — more breathing room, lighter weight */
+        /* ── Sidebar spacing + readability ── */
         [data-ag-sidebar] .group,
         [data-ag-sidebar] button[class*="text-left"],
         [data-ag-sidebar] div[class*="relative group"] {
-          padding-top: 8px !important;
-          padding-bottom: 8px !important;
-          margin-bottom: 2px !important;
+          padding-top: 8px !important; padding-bottom: 8px !important; margin-bottom: 2px !important;
         }
-        /* Chat title text — lighter, smaller */
-        [data-ag-sidebar] .group span,
-        [data-ag-sidebar] .group p,
+        [data-ag-sidebar] .group span, [data-ag-sidebar] .group p,
         [data-ag-sidebar] button[class*="text-left"] span,
         [data-ag-sidebar] button[class*="truncate"] {
-          font-weight: 400 !important;
-          font-size: 13px !important;
-          letter-spacing: 0.01em !important;
-          line-height: 1.4 !important;
+          font-weight: 400 !important; font-size: 13px !important;
+          letter-spacing: 0.01em !important; line-height: 1.4 !important;
         }
-        /* Folder items — less visual clutter */
         [data-ag-sidebar] div[class*="ml-5"],
-        [data-ag-sidebar] div[class*="pl-2"] {
-          border-left-color: rgba(255,255,255,0.06) !important;
-        }
-        /* Folder headers — cleaner */
-        [data-ag-sidebar] button[class*="font-medium"] {
-          font-weight: 500 !important;
-          font-size: 12.5px !important;
-        }
-        /* Chat icon (speech bubble) — subtler */
-        [data-ag-sidebar] .group svg:not([class*="h-3"]) {
-          opacity: 0.5 !important;
-          width: 14px !important;
-          height: 14px !important;
-        }
+        [data-ag-sidebar] div[class*="pl-2"] { border-left-color: rgba(255,255,255,0.06) !important; }
+        [data-ag-sidebar] button[class*="font-medium"] { font-weight: 500 !important; font-size: 12.5px !important; }
+        [data-ag-sidebar] .group svg:not([class*="h-3"]) { opacity: 0.5 !important; width: 14px !important; height: 14px !important; }
       `;
       document.head.appendChild(style);
     }
 
-    // NOTE: Removed custom capture-phase click handler.
-    // The SPA already has window.addEventListener('click', () => A(null))
-    // which closes the dropdown natively. Our handler was setting
-    // dd.style.display='none' BEFORE React could process button clicks,
-    // which is why Rename/Archive/Delete didn't work.
+    // Portal system: clone dropdown to body for correct positioning
+    let activePortal = null, activeBackdrop = null;
+    function closePortal() {
+      if (activePortal) { activePortal.remove(); activePortal = null; }
+      if (activeBackdrop) { activeBackdrop.remove(); activeBackdrop = null; }
+    }
+    function portalDropdown(original) {
+      closePortal();
+      const wrapper = original.closest(".relative") || original.parentElement;
+      const trigger = wrapper?.querySelector('button[class*="opacity-0"]') || wrapper?.querySelector("button");
+      const rect = trigger ? trigger.getBoundingClientRect() : { bottom: 200, right: 260 };
+
+      activeBackdrop = document.createElement("div");
+      activeBackdrop.className = "ag-dropdown-backdrop";
+      activeBackdrop.addEventListener("mousedown", (e) => {
+        e.stopPropagation(); closePortal();
+        window.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      document.body.appendChild(activeBackdrop);
+
+      activePortal = original.cloneNode(true);
+      activePortal.className = "ag-dropdown-portal";
+      activePortal.removeAttribute("style");
+      activePortal.style.top = (rect.bottom + 4) + "px";
+      activePortal.style.left = Math.max(8, rect.right - 130) + "px";
+
+      const clonedBtns = activePortal.querySelectorAll("button");
+      const originalBtns = original.querySelectorAll("button");
+      clonedBtns.forEach((btn, i) => {
+        btn.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation(); closePortal();
+          if (originalBtns[i]) setTimeout(() => originalBtns[i].click(), 10);
+        });
+      });
+      document.body.appendChild(activePortal);
+    }
+
+    // Scope to sidebar only (not body) to avoid triggering on SSE tokens
+    let _portalDebounce = null;
+    function startPortalObserver() {
+      const sb = document.querySelector("[data-ag-sidebar]");
+      if (!sb) { setTimeout(startPortalObserver, 500); return; }
+      new MutationObserver(() => {
+        if (_portalDebounce) return;
+        _portalDebounce = setTimeout(() => {
+          _portalDebounce = null;
+          const dd = sb.querySelector('div[class*="z-[200]"][class*="shadow"]');
+          if (dd && !dd.dataset.agPortaled) {
+            dd.dataset.agPortaled = "1";
+            requestAnimationFrame(() => portalDropdown(dd));
+          } else if (!dd && activePortal) { closePortal(); }
+        }, 50);
+      }).observe(sb, { childList: true, subtree: true });
+    }
+    startPortalObserver();
   }
 
   function boot() {
