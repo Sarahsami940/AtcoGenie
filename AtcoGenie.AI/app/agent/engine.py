@@ -31,19 +31,19 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Models that use thinking mode (thinkingConfig instead of thinking_budget=0)
 _THINKING_MODEL_IDS = frozenset({
-    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro-preview-05-06",
 })
 
 _MODEL_MAP: dict[str, tuple[str, str]] = {
     # Primary IDs — must stay in sync with VALID_MODELS in Program.cs and model-selector.js
-    "gemini-3.1-flash-lite-preview": ("google", "gemini-3.1-flash-lite-preview"),  # Fast / lightweight
-    "gemini-3.1-pro-preview":        ("google", "gemini-3.1-pro-preview"),          # Thinking / deep reasoning
+    "gemini-3.1-flash-lite-preview": ("google", "gemini-2.5-flash"),               # Fast / lightweight (stable API)
+    "gemini-3.1-pro-preview":        ("google", "gemini-2.5-pro-preview-05-06"),   # Thinking / deep reasoning
     "qwen-2.5-7b":                   ("qwen",  "Qwen2.5-7B-Instruct"),             # On-prem open-source
     # Legacy aliases — graceful fallback for stale Redis preferences
-    "gemini-2.5-pro":        ("google", "gemini-3.1-pro-preview"),
-    "gemini-2.5-flash":      ("google", "gemini-3.1-flash-lite-preview"),
-    "gemini-2.5-flash-lite": ("google", "gemini-3.1-flash-lite-preview"),
-    "gemini-3-pro":          ("google", "gemini-3.1-pro-preview"),
+    "gemini-2.5-pro":        ("google", "gemini-2.5-pro-preview-05-06"),
+    "gemini-2.5-flash":      ("google", "gemini-2.5-flash"),
+    "gemini-2.5-flash-lite": ("google", "gemini-2.5-flash"),
+    "gemini-3-pro":          ("google", "gemini-2.5-pro-preview-05-06"),
 }
 
 
@@ -230,6 +230,68 @@ Example format:
     - "YTD" / "year to date" → Jan 1 {current_year} to {today}
     - "last year" → Jan 1 {last_year} to Dec 31 {last_year}
     NEVER ask the user to clarify what "current" or "this month" means. Resolve it silently and state the resolved period in your response.
+
+---
+
+## VISUALIZATION PROTOCOL — When and how to emit charts
+
+When your response contains numeric data suitable for visualization, you MUST emit a `chart-json` fenced code block **in addition to** the markdown table and summary. The frontend renders it as an interactive chart with Download PNG, Download SVG, and Copy actions.
+
+### When to emit a chart:
+- Monthly/period trend data → **line** chart
+- Revenue vs Target side-by-side → **bar** (grouped)
+- Team-by-team or product-by-product ranking → **horizontalBar**
+- Revenue/unit share breakdown (≤10 entities) → **pie** or **donut**
+- Stacked contribution over time → **stackedBar**
+
+### When NOT to emit a chart:
+- Plain text answers with no numeric data
+- Single-number answers (e.g. "total revenue is PKR 3.2M")
+- Error messages or clarification responses
+
+### Chart spec format (for bar / line / area / stackedBar / horizontalBar):
+```chart-json
+{{
+  "type": "bar",
+  "title": "Monthly Revenue vs Target — Team Alpha (Jul–Sep 2024)",
+  "labels": ["Jul 24", "Aug 24", "Sep 24"],
+  "datasets": [
+    {{ "label": "Actual (PKR M)", "data": [3.2, 2.9, 4.1] }},
+    {{ "label": "Target (PKR M)", "data": [3.0, 3.0, 3.5] }}
+  ],
+  "xAxis": "Month",
+  "yAxis": "PKR (Millions)"
+}}
+```
+
+### Chart spec format (for pie / donut):
+```chart-json
+{{
+  "type": "donut",
+  "title": "Revenue Share by Product (Jan–Mar 2025)",
+  "data": [
+    {{ "name": "Ascard 75mg", "value": 3200000 }},
+    {{ "name": "Betaderm", "value": 2100000 }},
+    {{ "name": "Others", "value": 850000 }}
+  ]
+}}
+```
+
+### Chart spec rules:
+- Emit the chart spec as the **very last block** in your response, after the `---` summary table divider
+- Only emit **one chart per response** — choose the most impactful visualization
+- Use **exact raw numbers** from tool output — NEVER formatted strings like "3.2M" in data arrays
+- Labels must be concise (max 15 characters each)
+- For pie/donut with more than 8 items, group the smallest items as `"Others"`
+- `type` must be exactly one of: `bar`, `line`, `area`, `pie`, `donut`, `horizontalBar`, `stackedBar`
+- Do NOT add any extra keys or comments inside the JSON block
+
+### User-requested chart type (PRIORITY RULE):
+- If the user **explicitly asks for a specific chart type** in their message (e.g., "show me a pie chart", "bar graph please", "line chart"), you MUST use that exact type in the `type` field — override the auto-selection logic above.
+- If the requested type is **not compatible** with the data (e.g., user asks for "line" but data has no time sequence, or "pie" but there are 20+ categories), use the closest appropriate type AND add a brief inline note BEFORE the chart block, for example:
+  > "Note: I've used a horizontal bar chart instead of pie since there are 15+ categories — pie charts work best with ≤10 segments."
+- Supported types the user can request: `bar`, `line`, `area`, `pie`, `donut`, `horizontalBar` (horizontal bar), `stackedBar` (stacked bar)
+- If the user asks for a chart type that does not exist at all (e.g., "waterfall", "gantt"), respond: "That chart type isn't supported yet. Available types are: bar, line, area, pie, donut, horizontal bar, stacked bar. I'll use [closest type] instead." Then emit the chart with the closest type.
 """
 
 
