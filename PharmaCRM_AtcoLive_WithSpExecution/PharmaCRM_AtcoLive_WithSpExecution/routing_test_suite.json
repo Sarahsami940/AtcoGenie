@@ -1,0 +1,349 @@
+﻿{
+    "suite_version":  "1.0.0-live",
+    "source":  "Atco live Pharma database | PharmaCRM | read-only metadata and definition parse",
+    "routing_accuracy_tests":  [
+                                   {
+                                       "id":  "RA-001",
+                                       "prompt":  "Top 10 customers by revenue for Team 1 in Jan 2025.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-002",
+                                       "prompt":  "Which customers bought Viracure 250mg in Aug 2025?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-003",
+                                       "prompt":  "Brick-wise sales breakdown for my team in Q1 FY2025.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-004",
+                                       "prompt":  "Distributor-wise units of Betagenic Cream 15g for Team 5 this month.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-005",
+                                       "prompt":  "Show customer-product rows for Team 2 from Jul to Sep 2025.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-006",
+                                       "prompt":  "Who bought Itnaz Capsule 100mg in Karachi team last month?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-007",
+                                       "prompt":  "List detailed sales by customer and brick for Betaderm team.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-008",
+                                       "prompt":  "Which distributors sold Acdermin Gel in Team 1 in Feb 2026?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-009",
+                                       "prompt":  "Customer-wise and product-wise value table for Oncology-1 in Aug 2025.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-010",
+                                       "prompt":  "Give me row-level detailed sales for all products of Team 3 in one month.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-011",
+                                       "prompt":  "Which customer bought product X in brick Y this month?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                   },
+                                   {
+                                       "id":  "RA-012",
+                                       "prompt":  "What was total net revenue for all teams in Jan-Dec 2024?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-013",
+                                       "prompt":  "Show month-by-month revenue trend for Team X in FY 2025/2026.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-014",
+                                       "prompt":  "Sales vs target achievement for Team Alpha this fiscal year.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-015",
+                                       "prompt":  "Year-over-year revenue comparison for Team 1: FY2024/25 vs FY2025/26.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-016",
+                                       "prompt":  "Which team hit their sales target this month?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-017",
+                                       "prompt":  "All teams combined revenue for Feb 2026.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-018",
+                                       "prompt":  "Top products by total revenue across all teams in FY2025.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-019",
+                                       "prompt":  "Current fiscal monthly units and amount for Team 1.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-020",
+                                       "prompt":  "Compare trade vs institution monthly sales trend for Team 4.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-021",
+                                       "prompt":  "Show product TP matrix for the selected fiscal year.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-022",
+                                       "prompt":  "What percentage of distributors finalized this month?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_SVT"
+                                   },
+                                   {
+                                       "id":  "RA-023",
+                                       "prompt":  "What is my net incentive for Aug 2025?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-024",
+                                       "prompt":  "Show incentive summary for Team 16 this month.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-025",
+                                       "prompt":  "Which employees earned the highest incentive this month?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-026",
+                                       "prompt":  "Target achievement percentage for Oncology-1 in Aug 2025.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-027",
+                                       "prompt":  "Role-wise incentive comparison (TSM/DSM/RSM) for this month.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-028",
+                                       "prompt":  "Team-level YTD total earned incentive versus deductions.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-029",
+                                       "prompt":  "Employee-wise incentive payout for Team 16 for month start 2025-08-01.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-030",
+                                       "prompt":  "Give me YTD net incentive by team.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-031",
+                                       "prompt":  "How much incentive deduction did each role have this month?",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-032",
+                                       "prompt":  "Incentive achievement report for selected area IDs and role IDs.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   },
+                                   {
+                                       "id":  "RA-033",
+                                       "prompt":  "YTD sales target and YTD net incentive for Team Oncology-1.",
+                                       "expected_action":  "route",
+                                       "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                   }
+                               ],
+    "ambiguity_tests":  [
+                            {
+                                "id":  "AMB-001",
+                                "prompt":  "Top products this year.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "top_products_vs_top_customers"
+                            },
+                            {
+                                "id":  "AMB-002",
+                                "prompt":  "Target achievement this month.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "target_vs_incentive_achievement"
+                            },
+                            {
+                                "id":  "AMB-003",
+                                "prompt":  "Show performance trend for my team.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "trend_vs_entity_breakdown"
+                            },
+                            {
+                                "id":  "AMB-004",
+                                "prompt":  "Top performers in 2025.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "target_vs_incentive_achievement"
+                            },
+                            {
+                                "id":  "AMB-005",
+                                "prompt":  "Best product and customer this quarter.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "top_products_vs_top_customers"
+                            },
+                            {
+                                "id":  "AMB-006",
+                                "prompt":  "Need achievement percentages by month.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "target_vs_incentive_achievement"
+                            },
+                            {
+                                "id":  "AMB-007",
+                                "prompt":  "Show sales report for all teams.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "trend_vs_entity_breakdown"
+                            },
+                            {
+                                "id":  "AMB-008",
+                                "prompt":  "Give me summary for FY2025.",
+                                "expected_action":  "ask_clarification",
+                                "clarification_template":  "trend_vs_entity_breakdown"
+                            }
+                        ],
+    "boundary_safety_tests":  [
+                                  {
+                                      "id":  "BND-001",
+                                      "prompt":  "All teams detailed customer-product rows for last 24 months.",
+                                      "expected_action":  "ask_clarification_before_execute",
+                                      "expected_risk_band":  "high",
+                                      "reason":  "Detailed SP + broad scope may be expensive."
+                                  },
+                                  {
+                                      "id":  "BND-002",
+                                      "prompt":  "All teams top customers for full fiscal year with no product filter.",
+                                      "expected_action":  "ask_clarification_before_execute",
+                                      "expected_risk_band":  "high"
+                                  },
+                                  {
+                                      "id":  "BND-003",
+                                      "prompt":  "All teams monthly trend for five years.",
+                                      "expected_action":  "route_with_risk_note",
+                                      "expected_sp":  "dbo.Sp_PharmaCRM_SVT",
+                                      "expected_risk_band":  "medium"
+                                  },
+                                  {
+                                      "id":  "BND-004",
+                                      "prompt":  "Incentive report for every team and all roles for long month list.",
+                                      "expected_action":  "route_with_risk_note",
+                                      "expected_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport",
+                                      "expected_risk_band":  "medium"
+                                  },
+                                  {
+                                      "id":  "BND-005",
+                                      "prompt":  "Detailed brick-wise rows for all teams with no date limits.",
+                                      "expected_action":  "ask_clarification_before_execute",
+                                      "expected_risk_band":  "high"
+                                  },
+                                  {
+                                      "id":  "BND-006",
+                                      "prompt":  "All-team sales-vs-target plus customer-level breakdown.",
+                                      "expected_action":  "ask_clarification_before_execute",
+                                      "expected_risk_band":  "high"
+                                  },
+                                  {
+                                      "id":  "BND-007",
+                                      "prompt":  "All products, all distributors, all customers, all teams for one year.",
+                                      "expected_action":  "ask_clarification_before_execute",
+                                      "expected_risk_band":  "high"
+                                  },
+                                  {
+                                      "id":  "BND-008",
+                                      "prompt":  "Trend totals for all teams in one fiscal year.",
+                                      "expected_action":  "route_with_risk_note",
+                                      "expected_sp":  "dbo.Sp_PharmaCRM_SVT",
+                                      "expected_risk_band":  "medium"
+                                  }
+                              ],
+    "output_contract_tests":  [
+                                  {
+                                      "id":  "OC-001",
+                                      "assertion":  "Exactly 3 SP profiles exist.",
+                                      "expected":  3
+                                  },
+                                  {
+                                      "id":  "OC-002",
+                                      "assertion":  "Each profile contains all mandatory context fields.",
+                                      "expected":  true
+                                  },
+                                  {
+                                      "id":  "OC-003",
+                                      "assertion":  "Markdown spec and JSON profile list contain the same SP names.",
+                                      "expected":  true
+                                  },
+                                  {
+                                      "id":  "OC-004",
+                                      "assertion":  "Routing accuracy test count is \u003e= 30.",
+                                      "expected":  true
+                                  }
+                              ],
+    "regression_tests":  [
+                             {
+                                 "id":  "RG-001",
+                                 "assertion":  "Sp_PharmaCRM_SVT is treated as multi-result-set aggregate SP.",
+                                 "expected":  true
+                             },
+                             {
+                                 "id":  "RG-002",
+                                 "assertion":  "Sp_PharmaCRM_GetIncentiveProcessReport is treated as incentive-focused SP, not general sales trend SP.",
+                                 "expected":  true
+                             },
+                             {
+                                 "id":  "RG-003",
+                                 "assertion":  "SS_sp_CustomerSales_YTD_Excel is treated as entity-grain high-cardinality SP.",
+                                 "expected":  true
+                             }
+                         ],
+    "stored_procedures_were_executed_on_live":  true,
+    "live_execution_scope":  "narrow sample execution only; no direct DDL/DML issued by Codex"
+}

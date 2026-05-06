@@ -1,0 +1,594 @@
+﻿{
+    "metadata":  {
+                     "pack_version":  "1.0.0-live",
+                     "generated_on":  "2026-04-30",
+                     "source_of_truth":  {
+                                             "server_label":  "atco live pharma database",
+                                             "server_name":  "CRMSRV",
+                                             "data_source":  "10.10.0.9",
+                                             "database":  "PharmaCRM",
+                                             "inspection_method":  "direct read-only SQL metadata + procedure definition parsing",
+                                             "notes":  "Google Sheet data intentionally ignored. Stored procedures were not executed on live."
+                                         },
+                     "observed_runtime_seconds":  {
+                                                      "SS_sp_CustomerSales_YTD_Excel_single_team_single_month":  9.2,
+                                                      "Sp_PharmaCRM_SVT_single_team_fiscal_year":  5.38,
+                                                      "Sp_PharmaCRM_GetIncentiveProcessReport_single_team_single_month":  2.36
+                                                  },
+                     "read_only_evidence":  {
+                                                "database_confirmed":  "PharmaCRM",
+                                                "procedures_found":  3,
+                                                "runtime_execution_on_live":  "performed_after_user_approval_with_narrow_samples",
+                                                "definition_sha256":  {
+                                                                          "dbo.SS_sp_CustomerSales_YTD_Excel":  "021DAD5BCD7A550927C785933D2A42776B5314B46ADAF6FA17001A116F91CB3F",
+                                                                          "dbo.Sp_PharmaCRM_SVT":  "3B1EC1A06A688C8E453A3FC2091014C9F41FFB6CC471D78B44D4500A76CEE83D",
+                                                                          "dbo.Sp_PharmaCRM_GetIncentiveProcessReport":  "E1ECF3D9F3986647E239D5AF380E54385274FCC32D2E8B7FA27428934DFF9913"
+                                                                      },
+                                                "procedure_modify_dates":  {
+                                                                               "dbo.SS_sp_CustomerSales_YTD_Excel":  "2026-02-12 09:42:13.850",
+                                                                               "dbo.Sp_PharmaCRM_SVT":  "2026-02-12 10:05:04.910",
+                                                                               "dbo.Sp_PharmaCRM_GetIncentiveProcessReport":  "2026-03-09 12:42:25.560"
+                                                                           }
+                                            },
+                     "live_execution_evidence":  {
+                                                     "executed_after_user_approval":  true,
+                                                     "execution_date":  "2026-04-30",
+                                                     "execution_scope":  "narrow sample parameters only",
+                                                     "database":  "PharmaCRM",
+                                                     "server_name":  "CRMSRV",
+                                                     "pre_execution_blocker_check":  "no active blockers returned from sys.dm_exec_requests",
+                                                     "sql_error_files_all_empty":  true,
+                                                     "runtime_seconds":  {
+                                                                             "dbo.SS_sp_CustomerSales_YTD_Excel":  4.63,
+                                                                             "dbo.Sp_PharmaCRM_SVT":  5.38,
+                                                                             "dbo.Sp_PharmaCRM_GetIncentiveProcessReport":  0.4
+                                                                         },
+                                                     "sample_output_files":  {
+                                                                                 "dbo.SS_sp_CustomerSales_YTD_Excel":  "execution_samples/01_SS_sp_CustomerSales_YTD_Excel_output.txt",
+                                                                                 "dbo.Sp_PharmaCRM_SVT":  "execution_samples/02_Sp_PharmaCRM_SVT_output.txt",
+                                                                                 "dbo.Sp_PharmaCRM_GetIncentiveProcessReport":  "execution_samples/03_Sp_PharmaCRM_GetIncentiveProcessReport_output.txt"
+                                                                             }
+                                                 },
+                     "live_runtime_seconds":  {
+                                                  "dbo.SS_sp_CustomerSales_YTD_Excel":  4.63,
+                                                  "dbo.Sp_PharmaCRM_SVT":  5.38,
+                                                  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport":  0.4
+                                              }
+                 },
+    "router_policy":  {
+                          "classifier_dimensions":  [
+                                                        "intent_type",
+                                                        "required_grain",
+                                                        "time_scope",
+                                                        "comparison_type",
+                                                        "entity_constraints"
+                                                    ],
+                          "intent_type_definitions":  {
+                                                          "detailed_sales":  "Entity-level sales exploration by customer/brick/distributor/product.",
+                                                          "aggregated_sales_target":  "Trend/summary analytics, all-team totals, sales vs target, YoY-style comparisons.",
+                                                          "incentive_analytics":  "Incentive earned/deduction/net and achievement by employee/role/team."
+                                                      },
+                          "multi_match_policy":  {
+                                                     "default_action":  "ask_clarification",
+                                                     "reason":  "Avoid high-cost misroutes and semantic mismatches between sales-target and incentive domains."
+                                                 },
+                          "risk_scoring":  {
+                                               "no_hard_cap":  true,
+                                               "score_range":  "0-100",
+                                               "weights":  {
+                                                               "all_teams_scope":  25,
+                                                               "date_span_months_gt_12":  25,
+                                                               "requires_entity_level_output":  20,
+                                                               "missing_filters_on_detailed_sp":  20,
+                                                               "ambiguous_intent":  10
+                                                           },
+                                               "thresholds":  {
+                                                                  "low":  "0-39",
+                                                                  "medium":  "40-69",
+                                                                  "high":  "70-100"
+                                                              },
+                                               "fallback_policy":  {
+                                                                       "medium":  "route_with_risk_note",
+                                                                       "high":  "ask_clarification_before_execute"
+                                                                   }
+                                           },
+                          "ambiguity_templates":  [
+                                                      {
+                                                          "template_id":  "top_products_vs_top_customers",
+                                                          "question":  "Do you need product totals only (aggregated) or customer-level product details (detailed sales)?"
+                                                      },
+                                                      {
+                                                          "template_id":  "target_vs_incentive_achievement",
+                                                          "question":  "Are you asking for sales target achievement or incentive achievement?"
+                                                      },
+                                                      {
+                                                          "template_id":  "trend_vs_entity_breakdown",
+                                                          "question":  "Do you want month-by-month trend totals or a row-level list by customer/brick/distributor?"
+                                                      }
+                                                  ],
+                          "precedence_order":  [
+                                                   "If incentive terms are present, prefer Sp_PharmaCRM_GetIncentiveProcessReport unless prompt explicitly asks sales trend/volume/revenue outputs.",
+                                                   "If customer/brick/distributor-level entities are explicitly requested, prefer SS_sp_CustomerSales_YTD_Excel.",
+                                                   "If aggregate trend/YoY/sales-vs-target is requested, prefer Sp_PharmaCRM_SVT."
+                                               ]
+                      },
+    "profiles":  [
+                     {
+                         "sp_name":  "dbo.SS_sp_CustomerSales_YTD_Excel",
+                         "purpose":  "Returns detailed sales units and values at entity level for team-scoped customer sales analysis with dynamic month columns.",
+                         "input_intent":  [
+                                              "Detailed customer-wise product sales",
+                                              "Brick-wise and distributor-wise sales analysis",
+                                              "Who bought what and how much"
+                                          ],
+                         "output_grain":  "One row per Team x Customer x Brick x Product x DistributorType x Distributor, with dynamic month unit/value columns.",
+                         "result_sets":  [
+                                             {
+                                                 "set_name":  "RS0",
+                                                 "description":  "Final dynamic detail dataset with monthly pivot-style columns for units and values.",
+                                                 "is_dynamic":  true,
+                                                 "row_grain":  "Team x Customer x Brick x Product x DistributorType x Distributor",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "Team",
+                                                                     "type":  "varchar(200)"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Customer",
+                                                                     "type":  "varchar(200)"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Brick",
+                                                                     "type":  "varchar(200)"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Product",
+                                                                     "type":  "varchar(200)"
+                                                                 },
+                                                                 {
+                                                                     "name":  "DistributorType",
+                                                                     "type":  "varchar(20)"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Distributor",
+                                                                     "type":  "varchar(200)"
+                                                                 },
+                                                                 {
+                                                                     "name":  "\u003cMMM-YYYY\u003e(Units)",
+                                                                     "type":  "decimal(18,2)",
+                                                                     "dynamic":  true
+                                                                 },
+                                                                 {
+                                                                     "name":  "\u003cMMM-YYYY\u003e(Value)",
+                                                                     "type":  "decimal(18,2)",
+                                                                     "dynamic":  true
+                                                                 }
+                                                             ],
+                                                 "notes":  "Procedure prints dynamic SQL/debug lines; router should treat only final tabular SELECT as analytical output."
+                                             }
+                                         ],
+                         "filters_supported":  {
+                                                   "@CompCode":  "Company code.",
+                                                   "@FromYear/@FromMonth/@ToYear/@ToMonth":  "Inclusive date window by month range.",
+                                                   "@DistributorType":  "0 means no filter; maps \u0027Direct Sales to Patient\u0027 to \u0027Patient\u0027 internally.",
+                                                   "@DistributorID":  "Single or CSV; \u00270\u0027 no filter.",
+                                                   "@CustomerID":  "Single or CSV; \u00270\u0027 no filter.",
+                                                   "@BrickID":  "Single or CSV; \u00270\u0027 no filter.",
+                                                   "@TeamID":  "Single or CSV; \u00270\u0027 means all teams allowed for role scope.",
+                                                   "@ProductID":  "Single or CSV; \u00270\u0027 no filter.",
+                                                   "@UserRole/@EntUserEmpID":  "Role-aware team scoping; non-admin users constrained by TblEmpTeamsNew."
+                                               },
+                         "date_logic":  {
+                                            "input_style":  "FromYear/FromMonth to ToYear/ToMonth",
+                                            "computation":  "Uses DATEFROMPARTS and EOMONTH to build full-month inclusive range.",
+                                            "fiscal_assumption":  "No explicit fiscal-year boundary enforcement in procedure."
+                                        },
+                         "supports_targets":  false,
+                         "supports_incentive":  false,
+                         "supports_entity_breakdown":  true,
+                         "performance_risk":  {
+                                                  "level":  "high",
+                                                  "risk_drivers":  [
+                                                                       "Entity-level row explosion over broad scopes",
+                                                                       "Dynamic global temp table creation (##DynamicTempTable...)",
+                                                                       "Internal blocking-session kill logic present",
+                                                                       "Multiple dynamic SQL execution blocks"
+                                                                   ],
+                                                  "safe_pattern_hint":  "Best for single/few teams and constrained month windows with optional product/customer filters.",
+                                                  "runtime_evidence":  "Single team single month run observed around 9.2s.",
+                                                  "live_runtime":  "4.63s narrow live sample: team 1, product 0010550, Jul 2025"
+                                              },
+                         "anti_patterns":  [
+                                               {
+                                                   "pattern":  "All teams + long range + detail rows",
+                                                   "why_bad":  "High cardinality and heavy dynamic aggregation can stall or time out.",
+                                                   "preferred_route":  "dbo.Sp_PharmaCRM_SVT for aggregate intent"
+                                               },
+                                               {
+                                                   "pattern":  "YoY or pure trend-only analytics using detailed SP",
+                                                   "why_bad":  "Returns unnecessary entity-level rows instead of concise trend series.",
+                                                   "preferred_route":  "dbo.Sp_PharmaCRM_SVT"
+                                               },
+                                               {
+                                                   "pattern":  "Incentive/achievement payout questions",
+                                                   "why_bad":  "No incentive columns are returned.",
+                                                   "preferred_route":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                               }
+                                           ],
+                         "routing_rules":  [
+                                               {
+                                                   "rule_id":  "SS-001",
+                                                   "priority":  10,
+                                                   "when":  "Prompt asks customer-level, brick-level, distributor-level, or who-bought-what detail.",
+                                                   "route_action":  "route",
+                                                   "target_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel",
+                                                   "reason":  "This SP is designed for granular row-level sales detail."
+                                               },
+                                               {
+                                                   "rule_id":  "SS-002",
+                                                   "priority":  20,
+                                                   "when":  "Prompt asks only aggregate totals/trends/YoY without entity breakdown.",
+                                                   "route_action":  "do_not_route",
+                                                   "target_sp":  "dbo.Sp_PharmaCRM_SVT",
+                                                   "reason":  "Aggregated SP is semantically correct and lower cost."
+                                               }
+                                           ],
+                         "example_prompts_positive":  [
+                                                          "Top 10 customers by revenue for Team X in Jan 2025.",
+                                                          "Which customers bought Viracure in Q1 2025 for Team 1?",
+                                                          "Show brick-wise sales breakdown for my team in Aug 2025.",
+                                                          "Distributor-wise units for Betagenic Cream in Team 5 this month.",
+                                                          "List customer-product sales rows for Team 2 between Jul and Sep 2025."
+                                                      ],
+                         "example_prompts_negative":  [
+                                                          "Total net revenue for all teams in calendar year 2025.",
+                                                          "Sales vs target achievement for Team Alpha this fiscal year.",
+                                                          "Year-over-year revenue comparison 2024 vs 2025.",
+                                                          "Incentive summary for all teams in Aug 2025."
+                                                      ],
+                         "clarification_questions":  [
+                                                         "Do you need customer-level detail rows or just aggregate totals?",
+                                                         "Should I include all teams or only specific team(s)?",
+                                                         "Do you want sales detail output or sales-vs-target trend output?"
+                                                     ]
+                     },
+                     {
+                         "sp_name":  "dbo.Sp_PharmaCRM_SVT",
+                         "purpose":  "Returns aggregated sales and target analytics for fiscal-period comparisons, including current FY, previous FY, targets, product TP matrix, and distributor finalization coverage.",
+                         "input_intent":  [
+                                              "Sales trend and aggregate reporting",
+                                              "Sales vs target analysis",
+                                              "YoY-style monthly comparisons"
+                                          ],
+                         "output_grain":  "Primarily month-level aggregated rows for selected scope, plus product-level TP matrix and one coverage scalar.",
+                         "result_sets":  [
+                                             {
+                                                 "set_name":  "RS0",
+                                                 "description":  "Current fiscal year monthly actual trend.",
+                                                 "is_dynamic":  false,
+                                                 "row_grain":  "One row per month in current fiscal range",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "MonthYear",
+                                                                     "type":  "nvarchar"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Units",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Amount",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "PUnits",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "PAmount",
+                                                                     "type":  "decimal"
+                                                                 }
+                                                             ]
+                                             },
+                                             {
+                                                 "set_name":  "RS1",
+                                                 "description":  "Previous fiscal year monthly actual trend.",
+                                                 "is_dynamic":  false,
+                                                 "row_grain":  "One row per month for prior-year aligned fiscal range",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "MonthYear",
+                                                                     "type":  "nvarchar"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Units",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Amount",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "PUnits",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "PAmount",
+                                                                     "type":  "decimal"
+                                                                 }
+                                                             ]
+                                             },
+                                             {
+                                                 "set_name":  "RS2",
+                                                 "description":  "Current fiscal year target trend and as-on-date target overlays.",
+                                                 "is_dynamic":  false,
+                                                 "row_grain":  "One row per month in current fiscal range",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "MonthYear",
+                                                                     "type":  "nvarchar"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Units",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Amount",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "UnitsasonDate",
+                                                                     "type":  "decimal"
+                                                                 },
+                                                                 {
+                                                                     "name":  "AmountasonDate",
+                                                                     "type":  "decimal"
+                                                                 }
+                                                             ]
+                                             },
+                                             {
+                                                 "set_name":  "RS3",
+                                                 "description":  "Product TP matrix for Jan-Dec.",
+                                                 "is_dynamic":  false,
+                                                 "row_grain":  "One row per product",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "Product",
+                                                                     "type":  "varchar"
+                                                                 },
+                                                                 {
+                                                                     "name":  "Jan..Dec",
+                                                                     "type":  "decimal columns"
+                                                                 }
+                                                             ]
+                                             },
+                                             {
+                                                 "set_name":  "RS4",
+                                                 "description":  "Distributor finalized-count coverage string.",
+                                                 "is_dynamic":  false,
+                                                 "row_grain":  "Single row scalar",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "Count",
+                                                                     "type":  "nvarchar",
+                                                                     "example":  "(168/187)"
+                                                                 }
+                                                             ]
+                                             }
+                                         ],
+                         "filters_supported":  {
+                                                   "@Param_GroupId":  "Brand/group filter, CSV or blank.",
+                                                   "@Param_TeamId":  "Team filter, CSV or blank.",
+                                                   "@Param_ProductId":  "Product filter, CSV or blank.",
+                                                   "@Param_TerritoryId/@Param_RegionId/@Param_DistrictId":  "Geo filters, CSV or blank.",
+                                                   "@Param_SalesChannel":  "1=Trade, 2=Institution, else null/all.",
+                                                   "@Param_SalesType":  "1=Allocated, 2=Unallocated, 0/1/2 or blank=all.",
+                                                   "@Param_InvoiceDate_From/@Param_InvoiceDate_To":  "Fiscal period anchors (used directly in fact filters).",
+                                                   "@Param_MonthID":  "Month cutoff logic for finalized-date handling.",
+                                                   "@EmpID/@UserRole":  "Used to resolve territory scope when territory filter missing."
+                                               },
+                         "date_logic":  {
+                                            "input_style":  "Explicit fiscal from/to datetimes",
+                                            "computation":  "Generates month series via FN_GETDATES_BETWEEN_DATERANGE; compares current and prior fiscal windows.",
+                                            "important":  "Fact filters rely on exact fiscal from/to matching in target and sales tables."
+                                        },
+                         "supports_targets":  true,
+                         "supports_incentive":  false,
+                         "supports_entity_breakdown":  false,
+                         "performance_risk":  {
+                                                  "level":  "medium_high",
+                                                  "risk_drivers":  [
+                                                                       "Wide all-team scopes with many geo/product combinations",
+                                                                       "Multiple result-set generation per call",
+                                                                       "Role/territory expansion path via global temp (##TerritoryIds)"
+                                                                   ],
+                                                  "safe_pattern_hint":  "Best for aggregate trend questions and sales-vs-target summaries.",
+                                                  "runtime_evidence":  "Single team full fiscal-year run observed around 5.38s.",
+                                                  "live_runtime":  "5.38s narrow live sample: team 1, territory 939, FY 2025/2026"
+                                              },
+                         "anti_patterns":  [
+                                               {
+                                                   "pattern":  "Customer-level or brick-level detail questions",
+                                                   "why_bad":  "SP does not return customer/brick rows.",
+                                                   "preferred_route":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                               },
+                                               {
+                                                   "pattern":  "Incentive payout or deduction questions",
+                                                   "why_bad":  "No incentive payout fields in outputs.",
+                                                   "preferred_route":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport"
+                                               }
+                                           ],
+                         "routing_rules":  [
+                                               {
+                                                   "rule_id":  "SVT-001",
+                                                   "priority":  10,
+                                                   "when":  "Prompt asks monthly trends, all-team totals, sales vs target, or YoY-like comparisons.",
+                                                   "route_action":  "route",
+                                                   "target_sp":  "dbo.Sp_PharmaCRM_SVT",
+                                                   "reason":  "This SP is explicitly designed for aggregated sales/target analytics across fiscal windows."
+                                               },
+                                               {
+                                                   "rule_id":  "SVT-002",
+                                                   "priority":  20,
+                                                   "when":  "Prompt asks for customer/distributor-level record listings.",
+                                                   "route_action":  "do_not_route",
+                                                   "target_sp":  "dbo.SS_sp_CustomerSales_YTD_Excel",
+                                                   "reason":  "Need entity-level detail output unavailable in SVT."
+                                               }
+                                           ],
+                         "example_prompts_positive":  [
+                                                          "Total net revenue for all teams Jan-Dec 2024.",
+                                                          "Show month-by-month revenue trend for Team X in FY 2025/2026.",
+                                                          "Sales vs target for Team Alpha this fiscal year.",
+                                                          "Year-over-year monthly revenue comparison 2024 vs 2025.",
+                                                          "All teams combined revenue for Feb 2026."
+                                                      ],
+                         "example_prompts_negative":  [
+                                                          "Top 10 customers by revenue for Team X in Jan 2025.",
+                                                          "Which customers bought product Y this month?",
+                                                          "What is my net incentive for Aug 2025?"
+                                                      ],
+                         "clarification_questions":  [
+                                                         "Do you want aggregate trend totals or detailed customer rows?",
+                                                         "Should this be sales-vs-target analytics or incentive analytics?",
+                                                         "Is the requested time window fiscal-year based or calendar-year based?"
+                                                     ]
+                     },
+                     {
+                         "sp_name":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport",
+                         "purpose":  "Returns incentive-focused analytics with monthly pivot columns and YTD summaries at employee, role, and team levels.",
+                         "input_intent":  [
+                                              "Incentive earned and deduction analysis",
+                                              "Role-wise incentive performance",
+                                              "Team-level incentive summary"
+                                          ],
+                         "output_grain":  "Three result sets: employee-level summary, role-level summary, team-level summary; each includes YTD metrics plus month pivot columns.",
+                         "result_sets":  [
+                                             {
+                                                 "set_name":  "RS0",
+                                                 "description":  "Employee-level incentive summary with geo hierarchy.",
+                                                 "is_dynamic":  true,
+                                                 "row_grain":  "Team x Employee x Role x Region/District/Territory",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "TeamName, EmployeeCode, EmployeeName, Role, Region, District, Territory",
+                                                                     "type":  "string dimensions"
+                                                                 },
+                                                                 {
+                                                                     "name":  "YTD Sales Target (Rs.), YTD Sales Achievement (Rs.), YTD Achievement %, YTD Total Earned Incentive (Rs.), YTD Total Deduction (Rs.), YTD Net Incentive (Rs.)",
+                                                                     "type":  "decimal metrics"
+                                                                 },
+                                                                 {
+                                                                     "name":  "\u003cMM-YYYY\u003e Sales Target/Achievement/Achievement %/Earned/Deduction/Net",
+                                                                     "type":  "dynamic monthly pivot metrics"
+                                                                 }
+                                                             ]
+                                             },
+                                             {
+                                                 "set_name":  "RS1",
+                                                 "description":  "Role-level incentive summary.",
+                                                 "is_dynamic":  true,
+                                                 "row_grain":  "Team x Role",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "TeamName, Role, YTD metrics + dynamic monthly metric columns",
+                                                                     "type":  "mixed"
+                                                                 }
+                                                             ]
+                                             },
+                                             {
+                                                 "set_name":  "RS2",
+                                                 "description":  "Team-level incentive summary.",
+                                                 "is_dynamic":  true,
+                                                 "row_grain":  "Team",
+                                                 "columns":  [
+                                                                 {
+                                                                     "name":  "TeamName, YTD metrics + dynamic monthly metric columns",
+                                                                     "type":  "mixed"
+                                                                 }
+                                                             ]
+                                             }
+                                         ],
+                         "filters_supported":  {
+                                                   "@Compcode":  "Company code.",
+                                                   "@FiscalYearCode":  "Accepted by signature but not used in internal WHERE clauses.",
+                                                   "@MonthYear":  "Critical filter; used as exact IncentiveStartDate.",
+                                                   "@TeamIDs":  "CSV team filter.",
+                                                   "@RoleIDs":  "CSV role filter (1=TSM, 2=DSM, 3=RSM branches).",
+                                                   "@AreaIDs":  "CSV area filter; interpreted as territory/district/region by role branch.",
+                                                   "@GroupByIDs":  "Accepted by signature but not used in current logic."
+                                               },
+                         "date_logic":  {
+                                            "input_style":  "Single month start date as string",
+                                            "computation":  "Uses FORMAT(IncentiveStartDate, \u0027MM-yyyy\u0027) for dynamic monthly column labeling.",
+                                            "important":  "Procedure currently operates on provided month snapshot; multi-month trends require orchestrated multiple calls by router/service layer."
+                                        },
+                         "supports_targets":  true,
+                         "supports_incentive":  true,
+                         "supports_entity_breakdown":  false,
+                         "performance_risk":  {
+                                                  "level":  "medium",
+                                                  "risk_drivers":  [
+                                                                       "Global temp table ##GetIncentiveProcessReport shared namespace",
+                                                                       "Three dynamic SQL result sets per execution",
+                                                                       "Potential concurrency collision on global temp object"
+                                                                   ],
+                                                  "safe_pattern_hint":  "Best for incentive-domain questions scoped by month/team/role/area.",
+                                                  "runtime_evidence":  "Single team single month run observed around 2.36s.",
+                                                  "live_runtime":  "0.40s narrow live sample: team 1, role 1, month 2025-07-01"
+                                              },
+                         "anti_patterns":  [
+                                               {
+                                                   "pattern":  "General sales volume/revenue trends without incentive context",
+                                                   "why_bad":  "SP is designed around incentive process tables and payout metrics.",
+                                                   "preferred_route":  "dbo.Sp_PharmaCRM_SVT"
+                                               },
+                                               {
+                                                   "pattern":  "Customer-level purchase questions",
+                                                   "why_bad":  "No customer/product transaction detail rows.",
+                                                   "preferred_route":  "dbo.SS_sp_CustomerSales_YTD_Excel"
+                                               },
+                                               {
+                                                   "pattern":  "Finalization workflow state question",
+                                                   "why_bad":  "No explicit finalized/locked status output column in final result sets.",
+                                                   "preferred_route":  "clarify_or_other_workflow_sp"
+                                               }
+                                           ],
+                         "routing_rules":  [
+                                               {
+                                                   "rule_id":  "INC-001",
+                                                   "priority":  10,
+                                                   "when":  "Prompt asks incentive earned/net/deduction/achievement by employee, role, or team.",
+                                                   "route_action":  "route",
+                                                   "target_sp":  "dbo.Sp_PharmaCRM_GetIncentiveProcessReport",
+                                                   "reason":  "Only this SP returns payout-oriented incentive metrics."
+                                               },
+                                               {
+                                                   "rule_id":  "INC-002",
+                                                   "priority":  20,
+                                                   "when":  "Prompt asks pure sales trend or sales-vs-target without incentive payout context.",
+                                                   "route_action":  "do_not_route",
+                                                   "target_sp":  "dbo.Sp_PharmaCRM_SVT",
+                                                   "reason":  "SVT is the dedicated aggregate sales/target SP."
+                                               }
+                                           ],
+                         "example_prompts_positive":  [
+                                                          "What is my net incentive for Aug 2025?",
+                                                          "Show incentive summary for Team 16 this month.",
+                                                          "Which employees earned highest incentive this month?",
+                                                          "Role-wise incentive comparison (TSM vs DSM vs RSM) for Aug 2025.",
+                                                          "Total earned incentive vs deductions for Oncology-1."
+                                                      ],
+                         "example_prompts_negative":  [
+                                                          "Top 10 customers by revenue Team X Jan 2025.",
+                                                          "Month-by-month all-team net revenue trend for 2025.",
+                                                          "Which distributor sold most units of product Z?"
+                                                      ],
+                         "clarification_questions":  [
+                                                         "Are you asking about incentive payout metrics or sales target metrics?",
+                                                         "Should the summary be employee-level, role-level, or team-level?",
+                                                         "Which incentive month should be used as @MonthYear?"
+                                                     ]
+                     }
+                 ]
+}

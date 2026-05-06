@@ -238,6 +238,7 @@ html, body, #root {
 }
 
 
+/* ── Main content area ────────────────────────────────────────── */
 main,
 [class*="flex-1"][class*="overflow"],
 [class*="flex-1"][class*="h-full"] {
@@ -245,14 +246,14 @@ main,
   color: var(--main-text) !important;
 }
 
-/* AI message bubble */
+/* AI message bubble — fully opaque white card for clean readability */
 [class*="rounded-2xl"][class*="bg-white"],
 [class*="rounded-xl"][class*="bg-white"],
 .bg-white.rounded-2xl,
 .bg-white.rounded-xl {
-  background: var(--main-surface) !important;
-  border: 1px solid var(--main-border) !important;
-  box-shadow: 0 1px 6px rgba(0,0,0,0.06) !important;
+  background: #ffffff !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  box-shadow: 0 1px 8px rgba(0,0,0,0.06), 0 0 0 1px rgba(22,87,203,0.04) !important;
   color: var(--main-text) !important;
   backdrop-filter: none !important;
 }

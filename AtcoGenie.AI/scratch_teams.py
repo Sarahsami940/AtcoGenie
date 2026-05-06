@@ -1,34 +1,27 @@
+"""Check what teams exist in SS_Team — uses the same config as the running server."""
 import asyncio
-from app.database.manager import DatabaseManager
 from app.config import get_settings
+from app.database.manager import DatabaseManager
 
 async def main():
     s = get_settings()
-    db = DatabaseManager(s)
-    await db.initialize()
-    
-    # Find team-related tables
-    rows = await db.execute_raw("pharma", "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME LIKE '%eam%' ORDER BY TABLE_NAME")
-    print("=== Team-related tables ===")
-    for r in rows:
-        print(r)
-    
-    # Also check SP that resolves teams
-    print("\n=== Sp_GetEmployeeWiseTeam for emp 19762 ===")
-    rows2 = await db.execute_sp("pharma", "Sp_GetEmployeeWiseTeam", "19762")
-    print(f"Rows: {len(rows2)}")
-    for r in rows2:
-        print(r)
+    dm = DatabaseManager(s)
+    await dm.initialize()
 
-    # Try to find a team setup/master table
-    print("\n=== Looking for team setup tables ===")
-    for tbl in ["SS_TeamSetup", "SS_Team_Setup", "TeamSetup", "Team_Setup", "SS_Team", "Teams"]:
-        try:
-            r = await db.execute_raw("pharma", f"SELECT TOP 5 * FROM {tbl}")
-            print(f"\n>> {tbl} - {len(r)} rows:")
-            for row in r:
-                print(row)
-        except Exception as e:
-            pass  # table doesn't exist
+    # 1. Search for Betaderm
+    rows = await dm.execute_raw("pharma", "SELECT TeamId, Name, Active FROM SS_Team WHERE Name LIKE ? ORDER BY Name", "%etaderm%")
+    print("=== Betaderm matches ===")
+    for r in rows:
+        print(f"  ID={r['TeamId']:>4} | Name={r['Name']} | Active={r['Active']}")
+    if not rows:
+        print("  (NONE — 'Betaderm' does NOT exist as a team name)")
+
+    # 2. All active teams
+    rows2 = await dm.execute_raw("pharma", "SELECT TeamId, Name FROM SS_Team WHERE Active=1 ORDER BY TeamId")
+    print(f"\n=== All {len(rows2)} active teams ===")
+    for r in rows2:
+        print(f"  ID={str(r['TeamId']):>4} | {r['Name']}")
+
+    await dm.close()
 
 asyncio.run(main())

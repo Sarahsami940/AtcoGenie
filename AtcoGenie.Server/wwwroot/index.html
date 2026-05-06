@@ -50,6 +50,17 @@
       .scroll-smooth {
         scroll-behavior: auto !important;
       }
+
+      /* 5. Hide raw chart-json code blocks immediately.
+            ChainLit's markdown renderer outputs double-backtick inline code as:
+              <code class="bg-slate-100 ...">chart-json{...}</code>
+            We use the data attribute that chart-renderer.js applies immediately
+            (synchronously in scan(), before withECharts()) to hide these.     */
+      [data-ag-chart-hidden],
+      pre:has(> code[class*="chart-json"]),
+      pre:has(> code[class*="language-chart"]) {
+        display: none !important;
+      }
     </style>
 
     <script type="module" crossorigin src="/assets/index-BT3f023S.js"></script>
@@ -71,8 +82,11 @@
     <!-- Table Enhancer v3 — wide messages, full columns, capped height + sticky header -->
     <script src="/table-enhancer.js?v=5" defer></script>
 
-    <!-- AtcoGenie Theme Init — gradient blobs + interaction enhancements -->
-    <script src="/theme-init.js?v=14" defer></script>
+    <!-- Chart Renderer v4 — dedup guard, local ECharts, end-of-message placement -->
+    <script src="/chart-renderer.js?v=4" defer></script>
+
+    <!-- AtcoGenie Theme Init — restored blob opacity, 72% transparent main bg -->
+    <script src="/theme-init.js?v=16" defer></script>
 
   </body>
 </html>

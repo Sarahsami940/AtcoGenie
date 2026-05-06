@@ -18,6 +18,8 @@
   const MODELS = [
     { id: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash", sub: "Fast · Lightweight", icon: "⚡" },
     { id: "gemini-3.1-pro-preview",        label: "Gemini 3.1 Pro",   sub: "Thinking · Deep Reasoning", icon: "🧠" },
+    { id: "gemini-2.5-flash",              label: "Gemini 2.5 Flash", sub: "Stable · Fast", icon: "✦" },
+    { id: "gemini-2.5-pro",                label: "Gemini 2.5 Pro",   sub: "Stable · Reasoning", icon: "🔬" },
     { id: "qwen-2.5-7b",                   label: "Qwen 2.5 7B",     sub: "On-Prem · Open Source", icon: "🏠" },
   ];
   const DEFAULT_MODEL_ID = "gemini-3.1-flash-lite-preview";

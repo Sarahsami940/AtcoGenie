@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atco.local/schemas/pharmacrm-query-router/sp-context-pack.schema.json",
+  "title": "PharmaCRM Query Router SP Context Pack",
+  "type": "object",
+  "required": [
+    "metadata",
+    "router_policy",
+    "profiles"
+  ],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": [
+        "pack_version",
+        "generated_on",
+        "source_of_truth",
+        "live_execution_evidence"
+      ],
+      "properties": {
+        "pack_version": {
+          "type": "string"
+        },
+        "generated_on": {
+          "type": "string"
+        },
+        "source_of_truth": {
+          "type": "object",
+          "required": [
+            "server_label",
+            "database"
+          ],
+          "properties": {
+            "server_label": {
+              "type": "string"
+            },
+            "database": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "live_execution_evidence": {
+          "type": "object",
+          "required": [
+            "executed_after_user_approval",
+            "execution_date",
+            "execution_scope",
+            "runtime_seconds",
+            "sample_output_files"
+          ],
+          "properties": {
+            "executed_after_user_approval": {
+              "type": "boolean"
+            },
+            "execution_date": {
+              "type": "string"
+            },
+            "execution_scope": {
+              "type": "string"
+            },
+            "runtime_seconds": {
+              "type": "object"
+            },
+            "sample_output_files": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "router_policy": {
+      "type": "object",
+      "required": [
+        "classifier_dimensions",
+        "multi_match_policy",
+        "risk_scoring"
+      ],
+      "properties": {
+        "classifier_dimensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "multi_match_policy": {
+          "type": "object"
+        },
+        "risk_scoring": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "$ref": "#/$defs/spProfile"
+      }
+    }
+  },
+  "$defs": {
+    "resultSet": {
+      "type": "object",
+      "required": [
+        "set_name",
+        "description",
+        "is_dynamic",
+        "row_grain"
+      ],
+      "properties": {
+        "set_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "is_dynamic": {
+          "type": "boolean"
+        },
+        "row_grain": {
+          "type": "string"
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "routingRule": {
+      "type": "object",
+      "required": [
+        "rule_id",
+        "priority",
+        "when",
+        "route_action"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "when": {
+          "type": "string"
+        },
+        "route_action": {
+          "type": "string"
+        },
+        "target_sp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "spProfile": {
+      "type": "object",
+      "required": [
+        "sp_name",
+        "purpose",
+        "input_intent",
+        "output_grain",
+        "result_sets",
+        "filters_supported",
+        "date_logic",
+        "supports_targets",
+        "supports_incentive",
+        "supports_entity_breakdown",
+        "performance_risk",
+        "anti_patterns",
+        "routing_rules",
+        "example_prompts_positive",
+        "example_prompts_negative",
+        "clarification_questions"
+      ],
+      "properties": {
+        "sp_name": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "input_intent": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "output_grain": {
+          "type": "string"
+        },
+        "result_sets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resultSet"
+          }
+        },
+        "filters_supported": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "date_logic": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "supports_targets": {
+          "type": "boolean"
+        },
+        "supports_incentive": {
+          "type": "boolean"
+        },
+        "supports_entity_breakdown": {
+          "type": "boolean"
+        },
+        "performance_risk": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "anti_patterns": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "routing_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/routingRule"
+          }
+        },
+        "example_prompts_positive": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "example_prompts_negative": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "clarification_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

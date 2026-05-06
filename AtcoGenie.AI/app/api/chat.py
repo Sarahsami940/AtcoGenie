@@ -448,25 +448,42 @@ async def chat_stream(
 
         except asyncio.CancelledError:
             logger.info("agent_task_cancelled", user=context.user_id)
-            _db_cancel.set()  # abort any in-flight pyodbc thread
+            _db_cancel.set()
             await q.put({"type": "cancelled"})
-        except Exception as e:
-            import traceback
-            err_str = str(e)
-            logger.error("agent_stream_failed", user=context.user_id, error=traceback.format_exc())
 
-            # Classify the error into a user-friendly message
+        except Exception as e:
+            import traceback, httpx
+            tb = traceback.format_exc()
+            err_str = str(e)
+
+            # ── Transient network drop (Gemini stream interrupted mid-flight) ──
+            if isinstance(e, (httpx.ReadError, httpx.RemoteProtocolError)) or \
+               "ReadError" in tb or "RemoteProtocolError" in tb:
+                logger.warning("gemini_stream_dropped", user=context.user_id,
+                               had_partial=bool(full_reply))
+                if full_reply:
+                    # Send whatever was received before the drop
+                    partial = "".join(full_reply)
+                    note = (
+                        "\n\n---\n"
+                        "*⚠️ The AI connection was interrupted. "
+                        "The response above may be incomplete — please re-ask if you need more detail.*"
+                    )
+                    await q.put({"type": "done", "reply": partial + note, "user": meta["user"]})
+                else:
+                    await q.put({"type": "error", "reply": (
+                        "🔌 The connection to the AI service was interrupted before a response arrived. "
+                        "This is a temporary network issue — please **try again**."
+                    )})
+                return
+
+            logger.error("agent_stream_failed", user=context.user_id, error=tb)
+
             err_lower = err_str.lower()
             if "resource_exhausted" in err_str or "429" in err_str:
-                # True API rate limit
                 err_reply = "⏳ I'm temporarily rate-limited. Please wait 30–60 seconds and try again."
-            elif (
-                "timeout" in err_lower
-                or "deadline" in err_lower
-                or "timed out" in err_lower
-                or "deadlineexceeded" in err_lower
-            ):
-                # DB query or LLM inference timeout (should be rare now — timeouts are unlimited)
+            elif "timeout" in err_lower or "deadline" in err_lower or \
+                 "timed out" in err_lower or "deadlineexceeded" in err_lower:
                 err_reply = (
                     "⏱️ This query took too long and was terminated by the database server.\n\n"
                     "**Try one of these to speed it up:**\n"
@@ -477,6 +494,7 @@ async def chat_stream(
             else:
                 err_reply = f"An error occurred: {err_str[:200]}"
             await q.put({"type": "error", "reply": err_reply})
+
 
     async def event_generator() -> AsyncGenerator[str, None]:
         task = asyncio.create_task(run_agent())

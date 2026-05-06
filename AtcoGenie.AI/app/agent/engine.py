@@ -31,19 +31,20 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Models that use thinking mode (thinkingConfig instead of thinking_budget=0)
 _THINKING_MODEL_IDS = frozenset({
-    "gemini-2.5-pro-preview-05-06",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro",
 })
 
 _MODEL_MAP: dict[str, tuple[str, str]] = {
     # Primary IDs — must stay in sync with VALID_MODELS in Program.cs and model-selector.js
-    "gemini-3.1-flash-lite-preview": ("google", "gemini-2.5-flash"),               # Fast / lightweight (stable API)
-    "gemini-3.1-pro-preview":        ("google", "gemini-2.5-pro-preview-05-06"),   # Thinking / deep reasoning
+    "gemini-3.1-flash-lite-preview": ("google", "gemini-3.1-flash-lite-preview"),  # Fast / lightweight (3.1)
+    "gemini-3.1-pro-preview":        ("google", "gemini-3.1-pro-preview"),          # Thinking / deep reasoning (3.1)
+    "gemini-2.5-flash":              ("google", "gemini-2.5-flash"),                # Stable / fast (2.5)
+    "gemini-2.5-pro":                ("google", "gemini-2.5-pro"),                  # Stable / deep reasoning (2.5)
     "qwen-2.5-7b":                   ("qwen",  "Qwen2.5-7B-Instruct"),             # On-prem open-source
     # Legacy aliases — graceful fallback for stale Redis preferences
-    "gemini-2.5-pro":        ("google", "gemini-2.5-pro-preview-05-06"),
-    "gemini-2.5-flash":      ("google", "gemini-2.5-flash"),
     "gemini-2.5-flash-lite": ("google", "gemini-2.5-flash"),
-    "gemini-3-pro":          ("google", "gemini-2.5-pro-preview-05-06"),
+    "gemini-3-pro":          ("google", "gemini-3.1-pro-preview"),
 }
 
 

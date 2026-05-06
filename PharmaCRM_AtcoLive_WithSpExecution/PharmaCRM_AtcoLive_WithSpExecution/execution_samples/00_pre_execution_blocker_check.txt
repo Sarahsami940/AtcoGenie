@@ -1,0 +1,2 @@
+﻿session_id|blocking_session_id|status|command|wait_type|wait_time|database_name
+----------|-------------------|------|-------|---------|---------|-------------
