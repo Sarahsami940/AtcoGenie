@@ -115,8 +115,8 @@ app.MapGet("/api/whoami", (HttpContext context) =>
         HcmsEmployeeId = user.FindFirst("Genie:HcmsId")?.Value ?? "NOT FOUND (Hydration Failed)",
         
         Message = user.Identity?.IsAuthenticated == true 
-            ? "✅ You are logged in!" 
-            : "❌ You are NOT logged in. (Check Windows Auth / Browser Settings)"
+            ? "âœ… You are logged in!" 
+            : "âŒ You are NOT logged in. (Check Windows Auth / Browser Settings)"
     };
     
     return info;
@@ -186,8 +186,8 @@ app.MapGet("/api/test-orchestration", async (AtcoGenie.Server.Application.Servic
         HasPartialFailure = result.HasPartialFailure,
         Data = result.Data,
         Message = result.HasPartialFailure 
-            ? "⚠️ Partial success - some data sources failed but operation completed"
-            : "✅ All data sources responded successfully"
+            ? "âš ï¸ Partial success - some data sources failed but operation completed"
+            : "âœ… All data sources responded successfully"
     };
 });
 
@@ -197,7 +197,7 @@ app.MapGet("/api/schema", async (AtcoGenie.Server.Application.Services.ISchemaSe
     return await schemaService.GetSchemasAsync();
 });
 
-// ─── USER MODEL PREFERENCE API ───────────────────────────────────────────────
+// â”€â”€â”€ USER MODEL PREFERENCE API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Persists the user's selected LLM model in Redis so it survives page refresh.
 // The frontend interceptor calls PUT on model change; the query endpoint reads it.
 
@@ -354,7 +354,7 @@ app.MapPost("/api/query", async (
         }
     }
 
-    // 3. Forward to Python AI Engine — consume SSE stream efficiently
+    // 3. Forward to Python AI Engine â€” consume SSE stream efficiently
     var aiEngineUrl = configuration["AiEngine:BaseUrl"] ?? "http://localhost:8000";
     var client = httpClientFactory.CreateClient("AiEngine");
     client.BaseAddress = new Uri(aiEngineUrl);
@@ -385,7 +385,10 @@ app.MapPost("/api/query", async (
 
     try
     {
-        var httpResponse = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, httpContext.RequestAborted);
+        // Use CancellationToken.None so the Python agent keeps running even if
+        // the browser disconnects (user switched chats). We drain the full stream
+        // to capture the final reply for DB persistence.
+        var httpResponse = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, CancellationToken.None);
         
         httpContext.Response.ContentType = "text/event-stream";
         httpContext.Response.Headers.Append("Cache-Control", "no-cache");
@@ -393,21 +396,25 @@ app.MapPost("/api/query", async (
 
         if (!httpResponse.IsSuccessStatusCode)
         {
-            var errorBody = await httpResponse.Content.ReadAsStringAsync(httpContext.RequestAborted);
+            var errorBody = await httpResponse.Content.ReadAsStringAsync(CancellationToken.None);
             logger.LogError("AI Engine returned {Status}: {Body}", httpResponse.StatusCode, errorBody);
             await httpContext.Response.WriteAsync("data: {\"type\":\"error\", \"reply\":\"AI Engine error (" + httpResponse.StatusCode + ").\"}\n\n", httpContext.RequestAborted);
             return Results.Empty;
         }
 
-        using var stream = await httpResponse.Content.ReadAsStreamAsync(httpContext.RequestAborted);
+        using var stream = await httpResponse.Content.ReadAsStreamAsync(CancellationToken.None);
         using var reader = new System.IO.StreamReader(stream);
-        // The session ID this stream belongs to — injected into every event so
+        // The session ID this stream belongs to â€” injected into every event so
         // the frontend can discard events arriving for a non-active chat session.
         var streamSessionId = request.SessionId.HasValue ? request.SessionId.Value.ToString() : "";
 
-        while (!reader.EndOfStream && !httpContext.RequestAborted.IsCancellationRequested)
+        // Track browser disconnect separately â€” we stop WRITING to the browser
+        // but keep READING from Python so the full reply can be persisted to DB.
+        bool browserGone = httpContext.RequestAborted.IsCancellationRequested;
+
+        while (!reader.EndOfStream)
         {
-            var line = await reader.ReadLineAsync(httpContext.RequestAborted);
+            var line = await reader.ReadLineAsync(CancellationToken.None);
             if (line == null) break;
 
             // Inject session_id into every SSE data event so the client can
@@ -439,19 +446,39 @@ app.MapPost("/api/query", async (
                         replyText = replyProp.GetString() ?? "";
                     }
                 }
-                catch { /* malformed JSON — forward original line unchanged */ }
+                catch { /* malformed JSON â€” forward original line unchanged */ }
             }
 
-            await httpContext.Response.WriteAsync(line + "\n", httpContext.RequestAborted);
-
-            if (string.IsNullOrEmpty(line))
+            // Refresh disconnect flag â€” browser may have disconnected mid-stream
+            if (!browserGone && httpContext.RequestAborted.IsCancellationRequested)
             {
-                await httpContext.Response.Body.FlushAsync(httpContext.RequestAborted);
+                browserGone = true;
+                logger.LogInformation("Browser disconnected mid-stream for {User} â€” Python agent continues running.", username);
+            }
+
+            // Only write to browser if still connected; always keep reading for DB persistence
+            if (!browserGone)
+            {
+                try
+                {
+                    await httpContext.Response.WriteAsync(line + "\n", httpContext.RequestAborted);
+
+                    if (string.IsNullOrEmpty(line))
+                        await httpContext.Response.Body.FlushAsync(httpContext.RequestAborted);
+                }
+                catch (OperationCanceledException)
+                {
+                    browserGone = true;
+                    logger.LogInformation("SSE write failed â€” browser gone for {User}, continuing drain.", username);
+                }
             }
         }
     }
     catch (OperationCanceledException)
     {
+        // Only hit if the initial SendAsync was cancelled before we started reading.
+        // This shouldn't happen now (we use CancellationToken.None), but kept as safety net.
+        logger.LogWarning("SSE proxy initial request cancelled for {User}.", username);
         return Results.Empty;
     }
     catch (Exception ex)
@@ -506,7 +533,7 @@ async Task<string?> GetOrProvisionPythonToken(
     var token = (string?)await redisDb.StringGetAsync(userKey);
     if (!string.IsNullOrEmpty(token)) return token;
 
-    // Token missing — auto-provision same as /api/query
+    // Token missing â€” auto-provision same as /api/query
     try
     {
         using var scope = services.CreateScope();

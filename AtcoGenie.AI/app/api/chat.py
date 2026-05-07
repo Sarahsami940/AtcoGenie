@@ -418,11 +418,14 @@ async def chat_stream(
                     full_reply.append(text)
                     token_buffer.append(text)
 
-                    # Flush when batch threshold reached
-                    if sum(len(t) for t in token_buffer) >= BATCH_CHARS:
+                    # Flush a partial update when batch threshold reached.
+                    # EXCEPTION: For vertex-maas (Llama 4 Scout), skip partial_done
+                    # entirely — Llama narrates its reasoning as plain text during
+                    # generation, so streaming partial chunks would show thinking
+                    # steps to the user before the final cleanup pass runs.
+                    _is_vertex = req.model == "llama-4-scout"
+                    if not _is_vertex and sum(len(t) for t in token_buffer) >= BATCH_CHARS:
                         token_buffer.clear()
-                        # Send accumulated full_reply up to this point as a 'partial_done' event 
-                        # because the frontend React app might only listen to 'done'.
                         await q.put({"type": "partial_done", "reply": "".join(full_reply), "user": meta["user"]})
 
                 # Tool call start (e.g. "Fetching customer sales data...")
@@ -430,15 +433,52 @@ async def chat_stream(
                     tool_name = event.get("name", "")
                     await q.put({"type": "status", "message": f"Running {tool_name}..."})
 
-            # Flush any remaining buffered tokens
-            if token_buffer:
+            # Flush any remaining buffered tokens (skip partial_done for vertex-maas — see above)
+            _is_vertex = req.model == "llama-4-scout"
+            if token_buffer and not _is_vertex:
                 await q.put({"type": "partial_done", "reply": "".join(full_reply), "user": meta["user"]})
 
             reply = "".join(full_reply)
 
-            # Strip <think>...</think> blocks emitted by reasoning models (Llama, DeepSeek)
+            # ── Thinking / reasoning strip ────────────────────────────────────
+            # Applied ONLY to models known to leak reasoning into the output.
+            # 1. <think>...</think> tags (DeepSeek, some Llama configs)
+            # 2. Plain-text "Step N:" narration blocks (Llama 4 Scout default)
+            # 3. "Simulated Response" / "Simulated Output" headers Llama inserts
             import re
-            reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.DOTALL)
+
+            _narrating_models = {"llama-4-scout"}  # extend as needed
+            if req.model in _narrating_models:
+                # Strip XML think blocks
+                reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.DOTALL)
+
+                # Strip numbered step blocks: "Step N: ...\n" through to the next
+                # step header, a blank line before a heading, or end of string.
+                # Greedy match up to the next "Step \d+" or a markdown heading or EOF.
+                reply = re.sub(
+                    r"(?m)^Step\s+\d+[:\.].*?(?=(?:^Step\s+\d+[:\.])|(^#{1,3}\s)|(^\*\*[A-Z])|(^---)|\Z)",
+                    "",
+                    reply,
+                    flags=re.DOTALL | re.MULTILINE,
+                )
+
+                # Strip "Simulated Response" / "Simulated Output" markers Llama adds
+                reply = re.sub(r"(?m)^Simulated\s+(Response|Output|Answer)\s*\n", "", reply)
+
+                # Strip "However, to strictly follow..." preamble sentences
+                reply = re.sub(
+                    r"However,\s+to\s+strictly\s+follow.*?\n\n",
+                    "",
+                    reply,
+                    flags=re.DOTALL,
+                )
+
+                # Collapse 3+ consecutive blank lines down to 2
+                reply = re.sub(r"\n{3,}", "\n\n", reply)
+                reply = reply.strip()
+            else:
+                # For all other models just strip bare <think> tags as a safety net
+                reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.DOTALL)
 
             latency_ms = (__import__("time").monotonic() - t_start) * 1000
             logger.info("chat_stream_response", user=context.user_id,
