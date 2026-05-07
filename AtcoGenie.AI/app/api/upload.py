@@ -191,11 +191,15 @@ async def process_excel_to_parquet(
         print(f"\ndf.head():\n{df.head().to_string()}")
         print(f"{'='*60}\n")
 
-        # Coerce mixed-type object columns to string for pyarrow.
-        # Preserves actual NaN/None as None (not the string "nan").
+        # Coerce mixed-type object columns for pyarrow.
+        # Some Excel columns contain both int and str values (dtype=object).
+        # pyarrow chokes on this: "Expected bytes, got a 'int' object".
+        # Fix: explicitly convert every non-null value to Python str.
         for col in df.columns:
             if df[col].dtype == "object":
-                df[col] = df[col].where(df[col].isna(), df[col].astype(str))
+                df[col] = df[col].apply(
+                    lambda v: str(v) if pd.notna(v) else None
+                )
 
         schema = _infer_schema(df)
         parquet_path = os.path.join(UPLOAD_DIR, f"{upload_id}.parquet")
