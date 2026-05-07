@@ -401,30 +401,52 @@ app.MapPost("/api/query", async (
 
         using var stream = await httpResponse.Content.ReadAsStreamAsync(httpContext.RequestAborted);
         using var reader = new System.IO.StreamReader(stream);
+        // The session ID this stream belongs to — injected into every event so
+        // the frontend can discard events arriving for a non-active chat session.
+        var streamSessionId = request.SessionId.HasValue ? request.SessionId.Value.ToString() : "";
 
         while (!reader.EndOfStream && !httpContext.RequestAborted.IsCancellationRequested)
         {
             var line = await reader.ReadLineAsync(httpContext.RequestAborted);
             if (line == null) break;
 
-            await httpContext.Response.WriteAsync(line + "\n", httpContext.RequestAborted);
-            
-            if (string.IsNullOrEmpty(line))
-            {
-                await httpContext.Response.Body.FlushAsync(httpContext.RequestAborted);
-            }
-
-            if (line.StartsWith("data: "))
+            // Inject session_id into every SSE data event so the client can
+            // filter out events that arrive after the user has switched chats.
+            if (line.StartsWith("data: ") && !string.IsNullOrEmpty(streamSessionId))
             {
                 try
                 {
-                    var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(line[6..]);
-                    if (json.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "done" && json.TryGetProperty("reply", out var replyProp))
+                    var jsonStr = line[6..];
+                    using var doc = System.Text.Json.JsonDocument.Parse(jsonStr);
+                    var root = doc.RootElement;
+
+                    // Re-serialise with session_id added
+                    using var ms = new System.IO.MemoryStream();
+                    using (var writer = new System.Text.Json.Utf8JsonWriter(ms))
+                    {
+                        writer.WriteStartObject();
+                        foreach (var prop in root.EnumerateObject())
+                            prop.WriteTo(writer);
+                        writer.WriteString("session_id", streamSessionId);
+                        writer.WriteEndObject();
+                    }
+                    line = "data: " + System.Text.Encoding.UTF8.GetString(ms.ToArray());
+
+                    // Capture the reply text from 'done' events for persistence
+                    if (root.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "done"
+                        && root.TryGetProperty("reply", out var replyProp))
                     {
                         replyText = replyProp.GetString() ?? "";
                     }
                 }
-                catch { }
+                catch { /* malformed JSON — forward original line unchanged */ }
+            }
+
+            await httpContext.Response.WriteAsync(line + "\n", httpContext.RequestAborted);
+
+            if (string.IsNullOrEmpty(line))
+            {
+                await httpContext.Response.Body.FlushAsync(httpContext.RequestAborted);
             }
         }
     }

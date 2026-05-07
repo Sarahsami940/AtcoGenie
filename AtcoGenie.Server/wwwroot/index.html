@@ -63,6 +63,11 @@
       }
     </style>
 
+    <!-- SSE Session Guard v1 — must load BEFORE the React bundle.
+         Patches window.fetch so streaming events from background (non-active)
+         chat sessions are dropped, preventing thinking-state bleed on chat switch. -->
+    <script src="/session-guard.js?v=1"></script>
+
     <script type="module" crossorigin src="/assets/index-BT3f023S.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DUQe40Xf.css">
   </head>
