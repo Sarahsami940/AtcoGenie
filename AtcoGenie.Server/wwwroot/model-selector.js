@@ -20,6 +20,7 @@
     { id: "gemini-3.1-pro-preview",        label: "Gemini 3.1 Pro",   sub: "Thinking · Deep Reasoning", icon: "🧠" },
     { id: "gemini-2.5-flash",              label: "Gemini 2.5 Flash", sub: "Stable · Fast", icon: "✦" },
     { id: "gemini-2.5-pro",                label: "Gemini 2.5 Pro",   sub: "Stable · Reasoning", icon: "🔬" },
+    { id: "llama-4-scout",                 label: "Llama 4 Scout",    sub: "Open Source · Meta AI", icon: "🦙" },
     { id: "qwen-2.5-7b",                   label: "Qwen 2.5 7B",     sub: "On-Prem · Open Source", icon: "🏠" },
   ];
   const DEFAULT_MODEL_ID = "gemini-3.1-flash-lite-preview";

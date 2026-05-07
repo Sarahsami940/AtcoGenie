@@ -206,6 +206,7 @@ var VALID_MODELS = new HashSet<string> {
     "gemini-3.1-pro-preview",        // Thinking / deep reasoning
     "gemini-2.5-flash",              // Stable / fast (2.5)
     "gemini-2.5-pro",                // Stable / deep reasoning (2.5)
+    "llama-4-scout",                 // Open-source Llama 4 via Vertex AI
     "qwen-2.5-7b",                   // On-prem open-source Qwen 2.5-7B
 };
 const string DEFAULT_MODEL = "gemini-3.1-flash-lite-preview";

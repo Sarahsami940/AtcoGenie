@@ -41,6 +41,7 @@ _MODEL_MAP: dict[str, tuple[str, str]] = {
     "gemini-3.1-pro-preview":        ("google", "gemini-3.1-pro-preview"),          # Thinking / deep reasoning (3.1)
     "gemini-2.5-flash":              ("google", "gemini-2.5-flash"),                # Stable / fast (2.5)
     "gemini-2.5-pro":                ("google", "gemini-2.5-pro"),                  # Stable / deep reasoning (2.5)
+    "llama-4-scout":                 ("vertex-maas", "meta/llama-4-scout-17b-16e-instruct-maas"),  # Open-source via Vertex AI
     "qwen-2.5-7b":                   ("qwen",  "Qwen2.5-7B-Instruct"),             # On-prem open-source
     # Legacy aliases — graceful fallback for stale Redis preferences
     "gemini-2.5-flash-lite": ("google", "gemini-2.5-flash"),
@@ -234,9 +235,9 @@ Example format:
 
 ---
 
-## VISUALIZATION PROTOCOL — When and how to emit charts
+## VISUALIZATION PROTOCOL — MANDATORY chart emission
 
-When your response contains numeric data suitable for visualization, you MUST emit a `chart-json` fenced code block **in addition to** the markdown table and summary. The frontend renders it as an interactive chart with Download PNG, Download SVG, and Copy actions.
+**CRITICAL RULE — AUTO-CHART**: Every response that contains a markdown table with **3 or more numeric data rows** MUST include a `chart-json` fenced code block. This is NOT optional. If you write a table with numbers, you MUST also emit a chart. Skipping the chart when data is present is a FAILURE. The frontend renders it as an interactive chart with Download PNG, Download SVG, and Copy actions.
 
 ### When to emit a chart:
 - Monthly/period trend data → **line** chart
@@ -393,6 +394,31 @@ def get_llm(model_override: Optional[str] = None):
             max_output_tokens=max_out,
             model_kwargs=google_model_kwargs,
         )
+    elif provider == "vertex-maas":
+        # Llama 4 Scout on Vertex AI Model-as-a-Service (OpenAI-compatible endpoint)
+        import google.auth
+        import google.auth.transport.requests
+        from langchain_openai import ChatOpenAI
+
+        _VERTEX_BASE_URL = (
+            "https://us-east5-aiplatform.googleapis.com/v1/projects/"
+            "gen-lang-client-0371458373/locations/us-east5/endpoints/openapi"
+        )
+
+        # Get a fresh ADC token (auto-refreshes from cached credentials)
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        logger.info("llm_vertex_maas_init", model=model_str)
+
+        return ChatOpenAI(
+            model=model_str,
+            base_url=_VERTEX_BASE_URL,
+            api_key=creds.token,
+            temperature=0.3,
+            max_tokens=4096,
+        )
     elif provider == "qwen":
         from app.agent.qwen_llm import QwenChatLLM
         logger.info("llm_qwen_init", model=model_str)
@@ -451,9 +477,14 @@ def create_agent_executor(
     Agents are cached per (user_id, role, team_ids_csv, is_admin, model) to avoid
     rebuilding on every request. Each unique model gets its own cached agent.
     """
-    # Resolve the effective model key for caching
-    effective_model = _MODEL_MAP.get(model_override or "", (None, None))[1] if model_override else None
+    # Resolve the effective provider + model for caching decisions
+    effective_entry = _MODEL_MAP.get(model_override or "", (None, None)) if model_override else (None, None)
+    effective_provider = effective_entry[0]
+    effective_model = effective_entry[1]
     
+    # vertex-maas uses short-lived OAuth tokens — skip cache to ensure fresh token
+    skip_cache = effective_provider == "vertex-maas"
+
     cache_key = (
         security_context.user_id,
         user_context.user_role,
@@ -462,7 +493,7 @@ def create_agent_executor(
         effective_model,  # None = .env default
     )
 
-    if cache_key in _agent_cache:
+    if not skip_cache and cache_key in _agent_cache:
         logger.debug("agent_cache_hit", user=security_context.user_id, model=effective_model)
         return _agent_cache[cache_key]
 
@@ -478,11 +509,14 @@ def create_agent_executor(
         system_prompt=system_prompt,
     )
 
-    # Evict oldest entry if cache is full
-    if len(_agent_cache) >= _AGENT_CACHE_MAX:
-        oldest_key = next(iter(_agent_cache))
-        del _agent_cache[oldest_key]
-        logger.info("agent_cache_evicted", evicted_user=oldest_key[0])
+    # Don't cache vertex-maas agents (short-lived OAuth tokens)
+    if not skip_cache:
+        # Evict oldest entry if cache is full
+        if len(_agent_cache) >= _AGENT_CACHE_MAX:
+            oldest_key = next(iter(_agent_cache))
+            del _agent_cache[oldest_key]
+            logger.info("agent_cache_evicted", evicted_user=oldest_key[0])
 
-    _agent_cache[cache_key] = agent
+        _agent_cache[cache_key] = agent
+
     return agent

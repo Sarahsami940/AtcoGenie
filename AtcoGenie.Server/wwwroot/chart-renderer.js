@@ -21,11 +21,11 @@
   const ECHARTS_CDN  = "/assets/echarts.min.js";
   const CHART_HEIGHT = 320; // px
 
-  /* AtcoGenie brand colour palette */
+  /* AtcoGenie pastel colour palette — soft, vibrant, high-contrast on white */
   const BRAND_COLORS = [
-    "#1657CB", "#38bdf8", "#34d399", "#f59e0b",
-    "#ef4444", "#a78bfa", "#fb7185", "#4ade80",
-    "#facc15", "#60a5fa"
+    "#6B9EFF", "#FF8FAB", "#5DD6A8", "#FFB86B",
+    "#A78BFA", "#67D4E8", "#FF7B7B", "#84D69B",
+    "#F4C06E", "#7CC4FA", "#E888C8", "#9BE0B0"
   ];
 
   /* ── ECharts lazy loader ──────────────────────────────────────────────────── */
@@ -356,12 +356,12 @@
       }
 
       if (isHoriz) {
-        return {
+        const seriesObj = {
           name: ds.label,
           type: "bar",
           data: ds.data,
           barMaxWidth: 28,
-          itemStyle: { color: c, borderRadius: [0, 5, 5, 0] },
+          itemStyle: { borderRadius: [0, 5, 5, 0] },
           stack: isStacked ? "total" : undefined,
           label: datasets.length === 1 ? {
             show: true, position: "right",
@@ -370,16 +370,30 @@
             fontFamily: baseText.fontFamily
           } : undefined
         };
+        // Single dataset: color each bar differently
+        if (datasets.length === 1) {
+          seriesObj.colorBy = "data";
+        } else {
+          seriesObj.itemStyle.color = c;
+        }
+        return seriesObj;
       }
 
-      return {
+      const barObj = {
         name: ds.label,
         type: "bar",
         data: ds.data,
         barMaxWidth: 42,
-        itemStyle: { color: c, borderRadius: [4, 4, 0, 0] },
+        itemStyle: { borderRadius: [4, 4, 0, 0] },
         stack: isStacked ? "total" : undefined
       };
+      // Single dataset: color each bar differently
+      if (datasets.length === 1) {
+        barObj.colorBy = "data";
+      } else {
+        barObj.itemStyle.color = c;
+      }
+      return barObj;
     });
 
     return option;
