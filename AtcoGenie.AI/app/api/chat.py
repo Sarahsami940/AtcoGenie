@@ -435,6 +435,11 @@ async def chat_stream(
                 await q.put({"type": "partial_done", "reply": "".join(full_reply), "user": meta["user"]})
 
             reply = "".join(full_reply)
+
+            # Strip <think>...</think> blocks emitted by reasoning models (Llama, DeepSeek)
+            import re
+            reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.DOTALL)
+
             latency_ms = (__import__("time").monotonic() - t_start) * 1000
             logger.info("chat_stream_response", user=context.user_id,
                         reply_length=len(reply), latency_ms=round(latency_ms))

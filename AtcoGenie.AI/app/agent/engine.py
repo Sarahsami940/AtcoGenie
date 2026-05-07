@@ -300,6 +300,7 @@ Example format:
 def build_system_prompt(
     security_context: SecurityContext,
     user_context: ResolvedUserContext,
+    model_override: Optional[str] = None,
 ) -> str:
     """Builds the system prompt with user-specific context injected."""
     from datetime import date, timedelta
@@ -334,7 +335,7 @@ def build_system_prompt(
     current_month_from = cm_first.strftime("%Y/%m/%d")
     current_month_to   = cm_last.strftime("%Y/%m/%d")
 
-    return SYSTEM_PROMPT.format(
+    prompt = SYSTEM_PROMPT.format(
         display_name=security_context.display_name,
         user_role=user_context.user_role,
         team_count=team_count,
@@ -346,6 +347,31 @@ def build_system_prompt(
         current_month_from=current_month_from,
         current_month_to=current_month_to,
     )
+
+    # For non-Google models (Llama, Qwen, etc.), add strict behavioral rules
+    # to prevent reasoning narration and data hallucination
+    effective_provider = _MODEL_MAP.get(model_override or "", (None, None))[0] if model_override else None
+    if effective_provider and effective_provider != "google":
+        non_google_prefix = (
+            "## CRITICAL BEHAVIORAL RULES (OVERRIDE ALL BELOW)\n\n"
+            "1. **NEVER narrate your reasoning.** Do NOT say 'Step 1:', 'Let me think...', "
+            "'First, I need to...' or similar. Act silently and present only the FINAL answer.\n"
+            "2. **ALWAYS use tools for data.** NEVER simulate, fabricate, or assume data values. "
+            "If you need sales data, call the tool. If the tool fails, say so — do NOT invent numbers.\n"
+            "3. **NEVER show internal thinking.** The user must only see polished analysis, tables, "
+            "and charts — not your planning steps.\n"
+            "4. **Chart format**: When emitting chart-json, use a proper fenced code block with "
+            "triple backticks on separate lines:\n"
+            "````\n"
+            "```chart-json\n"
+            '{"type": "bar", ...}\n'
+            "```\n"
+            "````\n\n"
+            "---\n\n"
+        )
+        prompt = non_google_prefix + prompt
+
+    return prompt
 
 
 def get_llm(model_override: Optional[str] = None):
@@ -501,7 +527,7 @@ def create_agent_executor(
                 role=user_context.user_role, model=effective_model or "(env-default)")
     llm = get_llm(model_override)
     tools = get_agent_tools(security_context, db_manager, user_context)
-    system_prompt = build_system_prompt(security_context, user_context)
+    system_prompt = build_system_prompt(security_context, user_context, model_override=model_override)
 
     agent = create_agent(
         model=llm,
