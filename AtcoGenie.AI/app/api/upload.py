@@ -203,7 +203,22 @@ async def process_excel_to_parquet(
 
         schema = _infer_schema(df)
         parquet_path = os.path.join(UPLOAD_DIR, f"{upload_id}.parquet")
-        df.to_parquet(parquet_path, engine="pyarrow", index=False)
+
+        # Retry parquet write — on Windows, antivirus or stale file handles
+        # can cause intermittent [Errno 22] Invalid argument.
+        import time as _time
+        last_err = None
+        for attempt in range(3):
+            try:
+                df.to_parquet(parquet_path, engine="pyarrow", index=False)
+                last_err = None
+                break
+            except OSError as e:
+                last_err = e
+                if attempt < 2:
+                    _time.sleep(0.5)  # brief pause for file lock release
+        if last_err is not None:
+            raise last_err
 
         return len(df), schema, sheet_names, parquet_path
 
@@ -287,7 +302,7 @@ async def upload_dataset(
         raise HTTPException(status_code=413, detail="File exceeds the 25 MB limit.")
 
     upload_id = str(uuid.uuid4())
-    temp_path = os.path.join(UPLOAD_DIR, f"temp_{upload_id}_{fname}")
+    temp_path = os.path.join(UPLOAD_DIR, f"temp_{upload_id}.xlsx")
 
     # ── Stream to disk with byte-level guard ─────────────────────────────────
     total_bytes = 0
