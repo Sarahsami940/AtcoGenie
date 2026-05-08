@@ -358,9 +358,11 @@ def get_agent_tools(
           RS1 — Previous FY monthly actuals (for YoY)
           RS2 — Monthly targets + "As on" achievement columns
         """
+        import time as _time
         logger.info("sp_sync_call", sp=sp_name, args=str(args))
         await progress.emit("Fetching data from the database...")
 
+        t_sp_start = _time.monotonic()
         try:
             if sp_name == "Sp_PharmaCRM_SVT":
                 async with _svt_semaphore:
@@ -370,6 +372,8 @@ def get_agent_tools(
                 # Other SPs: wrap in same interface for unified handling below
                 cols, rows = await db_manager.execute_sp_sync("pharma", sp_name, *args)
                 all_rs = [(cols, rows)]
+            t_sp_end = _time.monotonic()
+            logger.info("sp_fetch_timing", sp=sp_name, sp_ms=round((t_sp_end - t_sp_start) * 1000))
         except Exception as e:
             err_str = str(e)
             logger.error("sp_sync_error", sp=sp_name, error=err_str)
@@ -503,29 +507,33 @@ def get_agent_tools(
         group_sums = {gi: {} for gi in selected_groups}
         group_counts = {gi: Counter() for gi in selected_groups}
 
-        for row in all_rows:
-            # Global numeric
-            for i in numeric_indices:
-                v = row[i]
-                if v is not None:
-                    fv = float(v)
-                    col = columns[i]
-                    numeric_sums[col] += fv
-                    if fv < numeric_mins[col]: numeric_mins[col] = fv
-                    if fv > numeric_maxs[col]: numeric_maxs[col] = fv
+        # ── Fast aggregation using pandas for large datasets ──────────────
+        t_agg_start = _time.monotonic()
+        import pandas as pd
 
-            # Per-group numeric
-            for gi in selected_groups:
-                gval = row[gi]
-                if gval is None:
-                    continue
-                group_counts[gi][gval] += 1
-                if gval not in group_sums[gi]:
-                    group_sums[gi][gval] = {columns[ni]: 0.0 for ni in numeric_indices}
-                for ni in numeric_indices:
-                    v = row[ni]
-                    if v is not None:
-                        group_sums[gi][gval][columns[ni]] += float(v)
+        df = pd.DataFrame(all_rows, columns=columns)
+        num_col_names = [columns[i] for i in numeric_indices]
+        for nc in num_col_names:
+            df[nc] = pd.to_numeric(df[nc], errors='coerce')
+
+        # Global aggregates
+        for nc in num_col_names:
+            numeric_sums[nc] = float(df[nc].sum())
+            numeric_mins[nc] = float(df[nc].min())
+            numeric_maxs[nc] = float(df[nc].max())
+
+        # Per-group aggregates
+        for gi in selected_groups:
+            gcol_name = columns[gi]
+            grouped = df.groupby(gcol_name, dropna=True)
+            group_counts[gi] = Counter(grouped.size().to_dict())
+            agg_result = grouped[num_col_names].sum()
+            for gval, row_data in agg_result.iterrows():
+                group_sums[gi][gval] = {nc: float(row_data[nc]) for nc in num_col_names}
+
+        t_agg_end = _time.monotonic()
+        logger.info("aggregation_timing", sp=sp_name, rows=total,
+                    agg_ms=round((t_agg_end - t_agg_start) * 1000))
 
         # Cache for export — scoped to this user so concurrent users don't interfere
         _last_report_params[security_context.user_id] = {
