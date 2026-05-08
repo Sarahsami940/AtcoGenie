@@ -478,7 +478,7 @@ def get_llm(model_override: Optional[str] = None):
             google_model_kwargs = {
                 "thinking": {"thinking_budget": 0},
             }
-            max_out = 4096
+            max_out = 12288  # complex analyses with tables + charts need room
 
         return ChatGoogleGenerativeAI(
             model=model_str,
