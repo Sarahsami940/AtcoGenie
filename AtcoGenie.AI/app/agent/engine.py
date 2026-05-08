@@ -348,10 +348,64 @@ def build_system_prompt(
         current_month_to=current_month_to,
     )
 
-    # For non-Google models (Llama, Qwen, etc.), add strict behavioral rules
-    # to prevent reasoning narration and data hallucination
+    # For non-Google models, we need to prevent reasoning narration.
+    # Llama 4 Scout (17B) specifically cannot follow a 3500-token system prompt —
+    # it ignores tools and narrates instead. Give it a drastically condensed prompt.
     effective_provider = _MODEL_MAP.get(model_override or "", (None, None))[0] if model_override else None
-    if effective_provider and effective_provider != "google":
+
+    if effective_provider == "vertex-maas":
+        # ── Condensed system prompt for Llama 4 Scout ──────────────────────
+        # ~800 tokens instead of ~3500. Retains tool routing + chart rules.
+        from datetime import date
+        today = date.today()
+
+        team_list = user_context.team_names if user_context.team_names else []
+        team_names_str = ", ".join(team_list) if team_list else "(none resolved)"
+        admin_flag = "YES — can see all teams" if user_context.is_admin else "NO"
+
+        prompt = (
+            "You are a Pharmaceutical Sales Analyst for Atco Laboratories.\n"
+            f"User: {security_context.display_name} | Role: {user_context.user_role} | Admin: {admin_flag}\n"
+            f"Teams: {team_names_str}\n"
+            f"Today: {today.isoformat()}\n\n"
+
+            "## ABSOLUTE RULES\n"
+            "1. ALWAYS use tools to get data. NEVER fabricate, simulate, or assume numbers.\n"
+            "2. NEVER narrate your thinking. No 'Step 1:', 'Let me think', 'First I need to'.\n"
+            "3. Present ONLY the final polished answer with tables and charts.\n"
+            "4. If a tool fails, say so — do NOT invent data.\n\n"
+
+            "## TOOL ROUTING\n"
+            "- Product/customer/brick/distributor detail → `customer_sales_report`\n"
+            "- Monthly trends, YoY, sales vs target → `aggregated_sales_report`\n"
+            "- Incentives/payouts → `incentive_summary_report`\n"
+            "- Product name lookup → `search_products` (use BEFORE other tools)\n"
+            "- Team list → `list_teams`\n"
+            "- Per-team breakdown: call `aggregated_sales_report` once per team.\n\n"
+
+            "## DATE RULES\n"
+            f"- 'this year' / '2025' → date_from='2025/01/01', date_to='2025/12/31'\n"
+            f"- 'this month' → first to last day of {today.strftime('%B %Y')}\n"
+            "- 'last quarter' → previous 3-month period\n"
+            "- NEVER ask the user to clarify dates. Resolve silently.\n\n"
+
+            "## RESPONSE FORMAT\n"
+            "- Use PKR with K/M suffixes (PKR 3.2M, PKR 450K).\n"
+            "- Always include a summary markdown table at the end.\n"
+            "- After any table with 3+ rows, emit a chart:\n\n"
+
+            "```chart-json\n"
+            '{"type": "bar", "title": "...", "labels": [...], '
+            '"datasets": [{"label": "...", "data": [...]}], '
+            '"xAxis": "...", "yAxis": "..."}\n'
+            "```\n\n"
+
+            "Supported types: bar, line, area, pie, donut, horizontalBar, stackedBar.\n"
+            "Use EXACT numbers from tool output in chart data arrays.\n"
+        )
+
+    elif effective_provider and effective_provider != "google":
+        # Other non-Google providers (Qwen, etc.) — use behavioral prefix on full prompt
         non_google_prefix = (
             "## CRITICAL BEHAVIORAL RULES (OVERRIDE ALL BELOW)\n\n"
             "1. **NEVER narrate your reasoning.** Do NOT say 'Step 1:', 'Let me think...', "

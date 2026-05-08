@@ -442,9 +442,8 @@ async def chat_stream(
 
             # ── Thinking / reasoning strip ────────────────────────────────────
             # Applied ONLY to models known to leak reasoning into the output.
-            # 1. <think>...</think> tags (DeepSeek, some Llama configs)
-            # 2. Plain-text "Step N:" narration blocks (Llama 4 Scout default)
-            # 3. "Simulated Response" / "Simulated Output" headers Llama inserts
+            # Llama 4 Scout concatenates Step blocks INLINE (not at line starts),
+            # so line-anchored regex fails. Use a more aggressive approach.
             import re
 
             _narrating_models = {"llama-4-scout"}  # extend as needed
@@ -452,25 +451,49 @@ async def chat_stream(
                 # Strip XML think blocks
                 reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.DOTALL)
 
-                # Strip numbered step blocks: "Step N: ...\n" through to the next
-                # step header, a blank line before a heading, or end of string.
-                # Greedy match up to the next "Step \d+" or a markdown heading or EOF.
+                # Strip all "Step N:" blocks — handles both inline and line-start.
+                # Match "Step <number>:" or "Step <number>." followed by text,
+                # up to the next Step header or a content marker.
                 reply = re.sub(
-                    r"(?m)^Step\s+\d+[:\.].*?(?=(?:^Step\s+\d+[:\.])|(^#{1,3}\s)|(^\*\*[A-Z])|(^---)|\Z)",
+                    r"Step\s+\d+\s*[:\.].*?(?=Step\s+\d+\s*[:\.]|```|---\s*\n|\|[\s\-]|## |$)",
                     "",
                     reply,
-                    flags=re.DOTALL | re.MULTILINE,
+                    flags=re.DOTALL,
                 )
 
-                # Strip "Simulated Response" / "Simulated Output" markers Llama adds
-                reply = re.sub(r"(?m)^Simulated\s+(Response|Output|Answer)\s*\n", "", reply)
+                # Strip "Let's assume" fabrication blocks
+                reply = re.sub(r"Let's assume.*?\n\n", "", reply, flags=re.DOTALL)
 
-                # Strip "However, to strictly follow..." preamble sentences
+                # Strip "Simulated Response/Output" markers
+                reply = re.sub(r"Simulated\s+(Response|Output|Answer)\s*\n?", "", reply)
+
+                # Strip "However, to strictly follow..." preamble
                 reply = re.sub(
                     r"However,\s+to\s+strictly\s+follow.*?\n\n",
                     "",
                     reply,
                     flags=re.DOTALL,
+                )
+
+                # Strip "Now, let's execute..." bridge sentences
+                reply = re.sub(r"Now,?\s+let'?s\s+execute.*?\n", "", reply)
+
+                # Fix malformed chart-json: Llama often omits the closing ```
+                # Pattern: ```chart-json{...} at end without closing ```
+                if "```chart-json" in reply and reply.rstrip().endswith("}"):
+                    # Find the last ```chart-json and ensure it has closing ```
+                    last_chart = reply.rfind("```chart-json")
+                    if last_chart != -1:
+                        after_chart = reply[last_chart:]
+                        if after_chart.count("```") == 1:  # only opening, no closing
+                            reply = reply + "\n```"
+
+                # Fix chart-json on same line as opening fence
+                # e.g. ```chart-json{"type":...} → ```chart-json\n{"type":...}
+                reply = re.sub(
+                    r"```chart-json\s*(\{)",
+                    "```chart-json\n\\1",
+                    reply,
                 )
 
                 # Collapse 3+ consecutive blank lines down to 2
