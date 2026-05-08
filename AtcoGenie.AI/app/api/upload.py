@@ -234,7 +234,9 @@ async def process_excel_to_parquet(
         )
 
     except Exception as e:
-        logger.error("process_excel_failed", upload_id=upload_id, error=str(e))
+        import traceback
+        tb = traceback.format_exc()
+        logger.error("process_excel_failed", upload_id=upload_id, error=str(e), traceback=tb)
         # Persist error so the status endpoint surfaces it
         if pool:
             try:
