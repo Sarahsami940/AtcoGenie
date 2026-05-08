@@ -79,9 +79,14 @@ async def _get_active_datasets(user_id: str, session_id: str, db_manager: Databa
             for r in rows:
                 try:
                     schema = json.loads(r["schema_json"]) if isinstance(r["schema_json"], str) else (r["schema_json"] or {})
-                    cols = [c for c in schema.keys() if c != "_sheet"]
+                    col_info = []
+                    for c, dtype in schema.items():
+                        if c == "_sheet":
+                            continue
+                        col_info.append(f"`{c}` ({dtype})")
+                    cols_str = ", ".join(col_info) if col_info else "(no columns)"
                 except Exception:
-                    cols = []
+                    cols_str = "(schema unavailable)"
 
                 try:
                     sheets = json.loads(r["sheet_names"]) if isinstance(r["sheet_names"], str) else (r["sheet_names"] or [])
@@ -90,20 +95,25 @@ async def _get_active_datasets(user_id: str, session_id: str, db_manager: Databa
 
                 sheet_hint = ""
                 if len(sheets) > 1:
-                    sheet_hint = f" Sheets: {', '.join(repr(s) for s in sheets)}. Filter with `WHERE _sheet = '<name>'`."
+                    sheet_hint = f"\n  Sheets: {', '.join(repr(s) for s in sheets)}. Filter with `WHERE _sheet = '<name>'`."
 
                 datasets.append(
                     f"- **'{r['filename']}'** (ID: `{r['id']}`, rows: {r['row_count']:,})"
-                    f"\n  Columns: {cols}{sheet_hint}"
+                    f"\n  Columns: {cols_str}{sheet_hint}"
                 )
 
             if datasets:
                 return (
-                    "The user has the following uploaded dataset(s) available for analysis:"
-                    "\n" + "\n".join(datasets)
-                    + "\n\nTo query them, use the `query_user_dataset` tool with the exact ID and a DuckDB SQL string."
-                    + " The table is always named `data` (e.g. `SELECT * FROM data`)."
-                    + " You can use full DuckDB SQL including JOINs, GROUP BY, window functions, etc."
+                    "The user has the following uploaded dataset(s) available for analysis:\n"
+                    + "\n".join(datasets)
+                    + "\n\n## UPLOADED DATA QUERY RULES"
+                    + "\n- Use `query_user_dataset` tool with the exact ID and a DuckDB SQL query."
+                    + "\n- The table is always named `data` (e.g. `SELECT * FROM data`)."
+                    + "\n- **IMPORTANT**: Columns marked as `text` that look numeric (e.g. contain '-' or blanks) "
+                    + "MUST be cast: `CAST(REPLACE(col, '-', '0') AS DOUBLE)`"
+                    + "\n- **FIRST QUERY**: Always start with `SELECT * FROM data LIMIT 5` to see actual data before writing complex SQL."
+                    + "\n- Use DuckDB SQL syntax (supports GROUP BY, window functions, CTEs, etc.)."
+                    + "\n- Return ALL results — never add LIMIT unless the user asks."
                 )
             return ""
     except Exception as e:

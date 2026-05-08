@@ -511,7 +511,7 @@ def get_llm(model_override: Optional[str] = None):
             base_url=_VERTEX_BASE_URL,
             api_key=creds.token,
             temperature=0.3,
-            max_tokens=16384,
+            max_tokens=8192,
         )
     elif provider == "qwen":
         from app.agent.qwen_llm import QwenChatLLM
