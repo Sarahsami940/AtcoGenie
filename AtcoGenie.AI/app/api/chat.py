@@ -206,7 +206,7 @@ async def chat(
                 
             result = await agent.ainvoke(
                 {"messages": messages},
-                config={**run_config, "recursion_limit": 50},
+                config={**run_config, "recursion_limit": 150},
             )
         except asyncio.CancelledError:
             logger.warning("agent_cancelled_by_client", user=context.user_id)
@@ -385,7 +385,7 @@ async def chat_stream(
 
             async for event in agent.astream_events(
                 {"messages": messages},
-                config={**run_config, "recursion_limit": 50},
+                config={**run_config, "recursion_limit": 150},
                 version="v2",
             ):
                 kind = event.get("event", "")
