@@ -26,7 +26,7 @@ builder.Services.AddScoped<AtcoGenie.Server.Application.Services.IChatHistorySer
 builder.Services.AddApplicationServices();
 
 // Redis setup for Sessions
-var redisConnection = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379,defaultDatabase=0";
+var redisConnection = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379,defaultDatabase=0,abortConnect=false";
 builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect(redisConnection));
 
 

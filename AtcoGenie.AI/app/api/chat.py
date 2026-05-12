@@ -111,7 +111,6 @@ async def _get_active_datasets(user_id: str, session_id: str, db_manager: Databa
                     + "\n- The table is always named `data` (e.g. `SELECT * FROM data`)."
                     + "\n- **IMPORTANT**: Columns marked as `text` that look numeric (e.g. contain '-' or blanks) "
                     + "MUST be cast: `CAST(REPLACE(col, '-', '0') AS DOUBLE)`"
-                    + "\n- **FIRST QUERY**: Always start with `SELECT * FROM data LIMIT 5` to see actual data before writing complex SQL."
                     + "\n- Use DuckDB SQL syntax (supports GROUP BY, window functions, CTEs, etc.)."
                     + "\n- Return ALL results — never add LIMIT unless the user asks."
                 )
