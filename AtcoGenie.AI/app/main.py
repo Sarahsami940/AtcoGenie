@@ -58,6 +58,12 @@ async def lifespan(app: FastAPI):
     await role_cache.connect()
     app.state.role_cache = role_cache
 
+    # 2b. Redis Session Context Cache (multi-turn conversational state)
+    from app.cache.session_context import SessionContextCache
+    session_ctx_cache = SessionContextCache(settings)
+    await session_ctx_cache.connect()
+    app.state.session_ctx_cache = session_ctx_cache
+
     # 3. Langfuse Observability (raw HTTP tracer — SDK-free for Python 3.14 compat)
     from app.agent.tracer import init_tracer
     from dotenv import dotenv_values
@@ -83,6 +89,16 @@ async def lifespan(app: FastAPI):
     # 5. Start background task for expiring Parquet files
     start_cleanup_job(db_manager)
 
+    # 6. Conversation Checkpointer (PostgresSaver for LangGraph)
+    from app.agent.checkpointer import init_checkpointer
+    try:
+        checkpointer = await init_checkpointer(settings)
+        app.state.checkpointer = checkpointer
+    except Exception as e:
+        logger.warning("checkpointer_init_failed", error=str(e),
+                       hint="Agent will run without conversation persistence")
+        app.state.checkpointer = None
+
     logger.info("atcogenie_ai_ready", status="all_services_initialized")
 
     yield  # Application runs here
@@ -98,9 +114,15 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "db_manager"):
         await app.state.db_manager.close()
 
-    # Close Redis
+    # Close Redis (role cache + session context cache)
     if hasattr(app.state, "role_cache"):
         await app.state.role_cache.close()
+    if hasattr(app.state, "session_ctx_cache"):
+        await app.state.session_ctx_cache.close()
+
+    # Close checkpointer
+    from app.agent.checkpointer import close_checkpointer
+    await close_checkpointer()
 
     logger.info("atcogenie_ai_shutdown_complete")
 
@@ -163,6 +185,12 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
+    import asyncio
+    import sys
+
+    # Required for psycopg async on Windows (ProactorEventLoop is incompatible)
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     settings = get_settings()
     uvicorn.run(

@@ -19,8 +19,15 @@ from app.security.context import SecurityContext
 from app.middleware.auth import get_security_context
 from app.database.manager import DatabaseManager, set_cancel_event as db_set_cancel_event
 from app.cache.role_cache import RoleCache
+from app.cache.session_context import SessionContextCache
 from app.agent.user_context import resolve_user_context
 from app.agent.engine import create_agent_executor
+from app.agent.checkpointer import get_checkpointer
+from app.agent.context_resolver import (
+    has_vague_references, build_context_preamble,
+    extract_entities_from_tool_calls, infer_intent, infer_target_system,
+)
+from app.agent.summarizer import needs_summarization, inject_summary_into_messages
 from app.logging_config import get_logger
 from app.agent import progress as progress_bus
 from app.agent.tracer import get_tracer
@@ -45,6 +52,10 @@ def _get_role_cache(request: Request) -> RoleCache:
     if not hasattr(request.app.state, "role_cache"):
         raise HTTPException(status_code=500, detail="Role Cache not initialized.")
     return request.app.state.role_cache
+
+
+def _get_session_ctx_cache(request: Request) -> SessionContextCache | None:
+    return getattr(request.app.state, "session_ctx_cache", None)
 
 
 async def _get_active_datasets(user_id: str, session_id: str, db_manager: DatabaseManager) -> str:
@@ -308,10 +319,18 @@ async def chat_stream(
         raise HTTPException(status_code=500, detail="Failed to resolve user context.")
 
     try:
-        agent = create_agent_executor(context, db_manager, user_context, model_override=req.model)
+        checkpointer = get_checkpointer()
+        agent = create_agent_executor(
+            context, db_manager, user_context,
+            model_override=req.model,
+            checkpointer=checkpointer,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to initialize the Insight Engine.")
 
+    # Load session context for multi-turn resolution
+    session_ctx_cache = _get_session_ctx_cache(request)
+    chat_session_id = request.headers.get("X-Session-Id", "")
     # Per-request state
     q: asyncio.Queue = asyncio.Queue()
     progress_bus.set_queue(q)
@@ -356,6 +375,21 @@ async def chat_stream(
                     messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user", "content": req.message})
 
+            # --- Multi-turn context resolution ---
+            if session_ctx_cache and chat_session_id:
+                session_ctx = await session_ctx_cache.get(chat_session_id)
+
+                # Inject rolling summary for long conversations
+                if session_ctx.summary and needs_summarization(session_ctx.message_count):
+                    messages = inject_summary_into_messages(messages, session_ctx.summary)
+
+                # Inject context preamble for vague references
+                if has_vague_references(req.message) and session_ctx.resolved_entities:
+                    preamble = build_context_preamble(session_ctx)
+                    if preamble:
+                        messages.insert(0, {"role": "system", "content": preamble})
+                        logger.debug("context_preamble_injected", session_id=chat_session_id)
+
             tracer = get_tracer()
             run_config = {}
             langfuse_cb = None
@@ -392,9 +426,14 @@ async def chat_stream(
             BATCH_CHARS = 50  # flush a chunk every ~50 chars
             _first_token_at: float | None = None
 
+            # Thread ID for checkpointer — uses session ID for per-conversation persistence
+            _thread_config = {}
+            if chat_session_id:
+                _thread_config["configurable"] = {"thread_id": chat_session_id}
+
             async for event in agent.astream_events(
                 {"messages": messages},
-                config={**run_config, "recursion_limit": 150},
+                config={**run_config, **_thread_config, "recursion_limit": 150},
                 version="v2",
             ):
                 kind = event.get("event", "")
@@ -522,6 +561,33 @@ async def chat_stream(
             # Send canonical full reply so frontend replaces the stream buffer
             # with the authoritative text (avoids any off-by-one token issues)
             await q.put({"type": "done", "reply": reply, "user": meta["user"]})
+
+            # --- Post-turn context update ---
+            if session_ctx_cache and chat_session_id:
+                try:
+                    # Extract entities from the agent's tool calls
+                    response_messages = []
+                    async for state in agent.aget_state_history(
+                        config={**_thread_config},
+                    ):
+                        response_messages = state.values.get("messages", [])
+                        break  # only need the latest state
+
+                    entities = extract_entities_from_tool_calls(response_messages)
+                    intent = infer_intent(req.message)
+                    target = infer_target_system(req.message)
+
+                    await session_ctx_cache.update_after_turn(
+                        session_id=chat_session_id,
+                        intent=intent,
+                        target_system=target,
+                        entities=entities,
+                    )
+                    logger.debug("session_context_updated",
+                                 session_id=chat_session_id, intent=intent,
+                                 entities=list(entities.keys()))
+                except Exception as e:
+                    logger.warning("session_context_update_failed", error=str(e))
 
         except asyncio.CancelledError:
             logger.info("agent_task_cancelled", user=context.user_id)

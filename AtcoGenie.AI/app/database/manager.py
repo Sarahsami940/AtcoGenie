@@ -246,7 +246,7 @@ class DatabaseManager:
                             batch = cur.fetchmany(batch_size)
                             if not batch:
                                 break
-                            rs_rows.extend(batch)
+                            rs_rows.extend(tuple(row) for row in batch)
                         logger.debug("execute_sp_sync_rs", sp=sp_name, rs=rs_index,
                                      cols=rs_cols, rows=len(rs_rows))
                         result_sets.append((rs_cols, rs_rows))

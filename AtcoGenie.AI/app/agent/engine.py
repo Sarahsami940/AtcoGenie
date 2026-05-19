@@ -565,6 +565,7 @@ def create_agent_executor(
     db_manager: DatabaseManager,
     user_context: ResolvedUserContext,
     model_override: Optional[str] = None,
+    checkpointer=None,
 ):
     """
     Returns a compiled LangGraph agent for the user's context.
@@ -601,6 +602,7 @@ def create_agent_executor(
         model=llm,
         tools=tools,
         system_prompt=system_prompt,
+        checkpointer=checkpointer,
     )
 
     # Don't cache vertex-maas agents (short-lived OAuth tokens)
